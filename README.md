@@ -1,4 +1,4 @@
-# **Name article**
+# **Article**
 
 The following repository contains the notebooks and the libraries used to obtain the results of this article. All datasets and libraries are open sourced and free to use. If you use any of the following in your analysis, please cite them properly.
 
