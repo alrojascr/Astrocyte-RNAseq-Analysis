@@ -1,0 +1,479 @@
+---
+title: "Identification of hub genes for astrocytes"
+output: html_notebook
+author: Alexis Felipe Rojas Cruz
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	fig.keep = 'all',
+	dpi = 600,
+	fig.width = 11,
+	fig.height = 8.5
+)
+```
+
+
+
+```{r include=FALSE, comment = ""}
+if (!("clusterProfiler" %in% rownames(installed.packages()))){
+    install.packages("clusterProfiler")
+}
+if (!("org.Hs.eg.db" %in% rownames(installed.packages()))){
+    install.packages("org.Hs.eg.db")
+}
+if (!("ggVennDiagram" %in% rownames(installed.packages()))){
+    install.packages("ggVennDiagram")
+}
+if (!("sf" %in% rownames(installed.packages()))){
+    install.packages("sf")
+}
+if (!("RColorBrewer" %in% rownames(installed.packages()))){
+    install.packages("RColorBrewer")
+}
+if (!("tidyverse" %in% rownames(installed.packages()))){
+    install.packages("tidyverse")
+}
+if (!("ggplot2" %in% rownames(installed.packages()))){
+    install.packages("ggplot2")
+}
+if (!("ggrepel" %in% rownames(installed.packages()))){
+    install.packages("ggrepel")
+}
+if (!("devtools" %in% rownames(installed.packages()))){
+    install.packages("devtools")
+}
+if (!("ggsci" %in% rownames(installed.packages()))){
+    install.packages("ggsci")
+}
+if (!("ComplexUpset" %in% rownames(installed.packages()))){
+    install.packages("ComplexUpset")
+}
+if (!("biomaRt" %in% rownames(installed.packages()))){
+    install.packages("biomaRt")
+}
+BiocManager::install("STRINGdb")
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggVennDiagram)
+library(sf)
+library(RColorBrewer)
+library(tidyverse)
+library(ggplot2)
+library(devtools)
+library(ggsci)
+library(biomaRt)
+library(ComplexUpset)
+library(STRINGdb)
+```
+
+# Setting data for constructing PPI network 
+
+### Loading data
+
+For the construction of the PPI network, we will use the enriched DEGs that are found in the BP, CC and MF categories
+
+```{r data}
+PA <- read.csv("../Enrichment/enrich_GO/GO_PA.csv", sep = ",", header = T)
+```
+
+## Palmitic Acid
+
+### Data Manipulation
+
+```{r PA_preparing, message=FALSE, warning=FALSE}
+PA_PPI <- PA %>% 
+  dplyr::select( geneID ) %>% 
+  tidyr::separate_rows( geneID ) %>% 
+  dplyr::select( geneID ) %>% 
+  dplyr::rename( hgnc_symbol = geneID ) %>% 
+  unique( . )
+
+mart <- useMart(biomart="ENSEMBL_MART_ENSEMBL", path="/biomart/martservice", dataset="hsapiens_gene_ensembl")
+PA_ensembl <- getBM(values=PA_PPI$hgnc_symbol, filters= "hgnc_symbol", attributes= c( "hgnc_symbol", "gene_biotype"), mart= mart)
+
+PA_proteins <- merge( PA_PPI, PA_ensembl, by = "hgnc_symbol") %>% 
+  dplyr::filter( gene_biotype == "protein_coding") %>% 
+  dplyr::select( hgnc_symbol ) %>%
+  dplyr::arrange( hgnc_symbol )
+```
+
+Save data
+
+```{r save}
+write.csv(PA_proteins, file="../PPI_network/PA_proteins.csv", quote = F, row.names = F)
+```
+
+# Enrichment analysis of the modular genes
+
+Cytoscape software was used to visualize the results. The modules of PPI were identified by MCODE tool.
+
+
+### Loading data
+
+
+```{r loading_data, modules}
+module.1_raw <- read.csv("../PPI_network/modules/module_1/raw-module.csv", sep = ",", header = T)
+module.2_raw <- read.csv("../PPI_network/modules/module_2/raw_module.csv", sep = ",", header = T)
+```
+
+
+## Module 1
+
+```{r module_1, preparation}
+
+module_1 <- module.1_raw %>%
+  dplyr::select(string_id = X.id, symbol = display.name, string_name = stringdb..canonical.name, string_sequece = stringdb..sequence,
+                string_description = stringdb..description, MCODE_status = MCODE..Node.Status..1., MCODE_score =      MCODE..Score..1.) %>%
+  dplyr::arrange( desc( MCODE_score ) )
+
+head(module_1)
+
+write.table(module_1, file="../PPI_network/modules/module_1/curated-module.csv", quote = F, row.names = F, sep = "\t")
+```
+
+### Enrichment
+
+```{r module_1, GO}
+module_1.genes <- clusterProfiler::bitr(module_1$symbol, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db" ) %>%
+  dplyr::select( ENTREZID ) %>%
+  dplyr::rename( Entrez = ENTREZID )
+
+module_1.GO_BP = enrichGO(module_1.genes$Entrez, ont = "BP", OrgDb = org.Hs.eg.db, pAdjustMethod = "BH", pvalueCutoff  = 0.01,
+                           qvalueCutoff  = 0.05, readable = TRUE)
+                           
+
+module1_GO <- dotplot(module_1.GO_BP, showCategory = 10) +
+  scale_color_gradientn(colours=c("#f7ca64", "#46bac2", "#371ea3"),
+  guide=guide_colorbar(reverse=TRUE, order=1)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme(panel.grid.major.y = element_line(linetype='dotted', color='#808080'),
+  axis.text.y = element_text(size = 18), axis.text.x = element_text(size = 18),
+  axis.title.x = element_text(size = 24), panel.grid.major.x = element_blank()) +
+  theme(strip.text.x = element_text(size = 24), strip.text.y = element_text(size = 24),
+  legend.title = element_text(size = 26, face = "bold"), legend.text = element_text(size = 22),
+  plot.title = element_text(size = 28, hjust = 0.5)) +
+  ggtitle("Biological Process")
+module1_GO
+
+ggsave("../PPI_network/modules/module_1/enrichment/GO/module1_GO.pdf", plot = module1_GO, dpi = 600, width = 9, height = 8)
+```
+
+```{r module_1, KEGG}
+
+module_1.KEGG = enrichKEGG(module_1.genes$Entrez, organism = "hsa", pAdjustMethod = 'BH', pvalueCutoff = 0.01,
+                            qvalueCutoff  = 0.05)
+                           
+
+module1_KEGG <- dotplot(module_1.KEGG, showCategory = 10) +
+  scale_color_gradientn(colours=c("#f7ca64", "#46bac2", "#371ea3"),
+  guide=guide_colorbar(reverse=TRUE, order=1)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme(panel.grid.major.y = element_line(linetype='dotted', color='#808080'),
+  axis.text.y = element_text(size = 18), axis.text.x = element_text(size = 18),
+  axis.title.x = element_text(size = 24), panel.grid.major.x = element_blank()) +
+  theme(strip.text.x = element_text(size = 24), strip.text.y = element_text(size = 24),
+  legend.title = element_text(size = 26, face = "bold"), legend.text = element_text(size = 22),
+  plot.title = element_text(size = 28, hjust = 0.5)) +
+  ggtitle("KEGG Pathway")
+module1_KEGG
+
+ggsave("../PPI_network/modules/module_1/enrichment/KEGG/module1_KEGG.pdf", plot = module1_KEGG, dpi = 600, width = 9, height = 8)
+```
+
+
+### Save data
+
+```{r module_1, save}
+
+module1_enrichGO <- module_1.GO_BP@result
+module1_enrichKEGG <- module_1.KEGG@result
+
+write.table(module1_enrichGO, file="../PPI_network/modules/module_1/enrichment/GO/module1_GO.csv", quote = F, row.names = F, sep = ";")
+write.csv(module1_enrichKEGG, file="../PPI_network/modules/module_1/enrichment/KEGG/module1_KEGG.csv", quote = F, row.names = F)
+
+```
+
+## Module 2
+
+```{r module_2, preparation}
+
+module_2 <- module.2_raw %>%
+  dplyr::select(string_id = X.id, symbol = display.name, string_name = stringdb..canonical.name, string_sequece = stringdb..sequence,
+                string_description = stringdb..description, MCODE_status = MCODE..Node.Status..1., MCODE_score =      MCODE..Score..1.) %>%
+  dplyr::arrange( desc( MCODE_score ) )
+
+head(module_2)
+
+write.table(module_2, file="../PPI_network/modules/module_2/curated-module.csv", quote = F, row.names = F, sep = "\t")
+```
+
+### Enrichment
+
+```{r module_2, GO}
+module_2.genes <- clusterProfiler::bitr(module_2$symbol, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db" ) %>%
+  dplyr::select( ENTREZID ) %>%
+  dplyr::rename( Entrez = ENTREZID )
+
+module_2.GO_BP = enrichGO(module_2.genes$Entrez, ont = "BP", OrgDb = org.Hs.eg.db, pAdjustMethod = "BH", pvalueCutoff  = 0.01,
+                           qvalueCutoff  = 0.05, readable = TRUE)
+                           
+
+module2_GO <- dotplot(module_2.GO_BP, showCategory = 10) +
+  scale_color_gradientn(colours=c("#f7ca64", "#46bac2", "#371ea3"),
+  guide=guide_colorbar(reverse=TRUE, order=1)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme(panel.grid.major.y = element_line(linetype='dotted', color='#808080'),
+  axis.text.y = element_text(size = 18), axis.text.x = element_text(size = 18),
+  axis.title.x = element_text(size = 24), panel.grid.major.x = element_blank()) +
+  theme(strip.text.x = element_text(size = 24), strip.text.y = element_text(size = 24),
+  legend.title = element_text(size = 26, face = "bold"), legend.text = element_text(size = 22),
+  plot.title = element_text(size = 28, hjust = 0.5)) +
+  ggtitle("Biological Process")
+module2_GO
+
+ggsave("../PPI_network/modules/module_2/enrichment/GO/module2_GO.pdf", plot = module2_GO, dpi = 600, width = 9, height = 8)
+```
+
+```{r module_2, KEGG}
+
+module_2.KEGG = enrichKEGG(module_2.genes$Entrez, organism = "hsa", pAdjustMethod = 'BH', pvalueCutoff = 0.01,
+                            qvalueCutoff  = 0.05)
+                           
+
+module2_KEGG <- dotplot(module_2.KEGG, showCategory = 10) +
+  scale_color_gradientn(colours=c("#f7ca64", "#46bac2", "#371ea3"),
+  guide=guide_colorbar(reverse=TRUE, order=1)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme(panel.grid.major.y = element_line(linetype='dotted', color='#808080'),
+  axis.text.y = element_text(size = 18), axis.text.x = element_text(size = 18),
+  axis.title.x = element_text(size = 24), panel.grid.major.x = element_blank()) +
+  theme(strip.text.x = element_text(size = 24), strip.text.y = element_text(size = 24),
+  legend.title = element_text(size = 26, face = "bold"), legend.text = element_text(size = 22),
+  plot.title = element_text(size = 28, hjust = 0.5)) +
+  ggtitle("KEGG Pathway")
+module2_KEGG
+
+ggsave("../PPI_network/modules/module_2/enrichment/KEGG/module2_KEGG.pdf", plot = module2_KEGG, dpi = 600, width = 9, height = 8)
+```
+
+
+### Save data
+
+```{r module_2, save}
+
+module2_enrichGO <- module_2.GO_BP@result
+module2_enrichKEGG <- module_2.KEGG@result
+
+write.table(module2_enrichGO, file="../PPI_network/modules/module_2/enrichment/GO/module2_GO.csv", quote = F, row.names = F, sep = ";")
+write.csv(module2_enrichKEGG, file="../PPI_network/modules/module_2/enrichment/KEGG/module2_KEGG.csv", quote = F, row.names = F)
+
+```
+
+
+# Identification of hub genes
+
+The hub genes were screened out by the cytoHubba plugin, a tool that identifies hub genes through multiple algorithms. The intersections of four ranking algorithms, including Maximal Clique Centrality (MCC), Density of Maximum Neighborhood Component (DMNC), Maximum Neighborhood Component (MNC), Degree, were considered as hub genes.
+
+### Loading data
+
+
+```{r loading_data, hub_genes}
+MCC_raw <- read.csv("../PPI_network/hub_genes/MCC_top20.csv", sep = ",", header = T)
+DMNC_raw <- read.csv("../PPI_network/hub_genes/DMNC_top20.csv", sep = ",", header = T)
+MNC_raw <- read.csv("../PPI_network/hub_genes/MNC_top20.csv", sep = ",", header = T)
+Degree_raw <- read.csv("../PPI_network/hub_genes/Degree_top20.csv", sep = ",", header = T)
+```
+
+
+### Setting the files
+
+
+```{r hub genes, preparing_data}
+string_db <- STRINGdb$new( version="11.5", species=9606, score_threshold=400)
+
+term <- string_db$get_proteins()
+
+#MCC 
+MCC <- MCC_raw %>%
+  dplyr::select( Name, Score ) %>% 
+  dplyr::rename( protein_external_id = Name ) %>% 
+  merge( term, ., by = "protein_external_id" ) %>%
+  dplyr::select( protein_external_id, preferred_name, Score ) %>%
+  dplyr::mutate( protein_external_id = str_remove_all(protein_external_id, "9606." )) %>% 
+  dplyr::rename( Protein_ID = protein_external_id, Symbol = preferred_name ) %>%
+  tibble::add_column(Method = "MCC", .before = "Protein_ID") %>% 
+  dplyr::arrange( desc(Score) )
+
+#DMNC 
+DMNC <- DMNC_raw %>%
+  dplyr::select( Name, Score ) %>% 
+  dplyr::rename( protein_external_id = Name ) %>% 
+  merge( term, ., by = "protein_external_id" ) %>%
+  dplyr::select( protein_external_id, preferred_name, Score ) %>%
+  dplyr::mutate( protein_external_id = str_remove_all(protein_external_id, "9606." )) %>% 
+  dplyr::rename( Protein_ID = protein_external_id, Symbol = preferred_name ) %>%
+  tibble::add_column(Method = "DMNC", .before = "Protein_ID") %>% 
+  dplyr::arrange( desc(Score) )
+
+#MNC
+MNC <- MNC_raw %>%
+  dplyr::select( Name, Score ) %>% 
+  dplyr::rename( protein_external_id = Name ) %>% 
+  merge( term, ., by = "protein_external_id" ) %>%
+  dplyr::select( protein_external_id, preferred_name, Score ) %>%
+  dplyr::mutate( protein_external_id = str_remove_all(protein_external_id, "9606." )) %>% 
+  dplyr::rename( Protein_ID = protein_external_id, Symbol = preferred_name ) %>%
+  tibble::add_column(Method = "MNC", .before = "Protein_ID") %>% 
+  dplyr::arrange( desc(Score) )
+
+#Degree
+Degree <- Degree_raw %>%
+  dplyr::select( Name, Score ) %>% 
+  dplyr::rename( protein_external_id = Name ) %>% 
+  merge( term, ., by = "protein_external_id" ) %>%
+  dplyr::select( protein_external_id, preferred_name, Score ) %>%
+  dplyr::mutate( protein_external_id = str_remove_all(protein_external_id, "9606." )) %>% 
+  dplyr::rename( Protein_ID = protein_external_id, Symbol = preferred_name ) %>%
+  tibble::add_column(Method = "Degree", .before = "Protein_ID") %>% 
+  dplyr::arrange( desc(Score) )
+```
+
+```{r hub_genes save}
+write.csv(MCC, file="../PPI_network/hub_genes/curated-hub/MCC.csv", quote = F, row.names = F)
+write.csv(MNC, file="../PPI_network/hub_genes/curated-hub/MNC.csv", quote = F, row.names = F)
+write.csv(DMNC, file="../PPI_network/hub_genes/curated-hub/DMNC.csv", quote = F, row.names = F)
+write.csv(Degree, file="../PPI_network/hub_genes/curated-hub/Degree.csv", quote = F, row.names = F)
+```
+
+### Upset diagram
+
+```{r hub genes, upset}
+
+hub_genes <- data.frame(genes = c(MCC$Symbol, MNC$Symbol, DMNC$Symbol, Degree$Symbol),
+                        method = c(MCC$Method, MNC$Method, DMNC$Method, Degree$Method)) %>%
+  dplyr::count(genes, method) %>% 
+  pivot_wider(names_from = method,
+              values_from = n,
+              values_fill = list(n = 0))
+
+method = colnames(hub_genes)[2:5]
+
+p1 <- upset(
+    hub_genes,
+    method,
+    base_annotations=list(
+        'Intersection size'=intersection_size(
+            mapping=aes(fill='bars_color')
+        ) + scale_fill_manual(values=c('bars_color'='PaleGoldenrod'), guide='none')
+    ),
+    encode_sets=FALSE,
+    matrix=(
+        intersection_matrix(
+            geom=geom_point(
+                shape='square',
+                size=5
+            ),
+            segment=geom_segment(
+                linetype='dotted'
+            ),
+            outline_color=list(
+                active='darkorange3',
+                inactive='grey70'
+            )
+        )
+        + scale_color_manual(
+            values=c('TRUE'='orange', 'FALSE'='grey'
+            )
+        )
+        + scale_y_discrete(
+            position='right'
+        )
+    ),
+    queries=list(
+        upset_query(
+            intersect=c('MNC', 'Degree', 'MCC', 'DMNC'),
+            color='DarkSeaGreen',
+            fill='DarkSeaGreen',
+            only_components=c('intersections_matrix', 'Intersection size')
+        )
+    )
+)
+
+ggsave("../PPI_network//hub_genes/common-hub/Upset.pdf", plot = p1, dpi = 600, width = 8, height = 6)
+```
+
+
+Retrieve the common hub genes
+
+```{r hub genes common}
+
+hub_common <- Degree %>%
+    dplyr::select(-Method) %>% 
+    dplyr::rename( Degree_Score = Score ) %>%
+    merge( DMNC, ., by = c("Symbol", "Protein_ID") ) %>%
+    dplyr::rename( DMNC_Score = Score ) %>%
+    dplyr::select(-Method) %>% 
+    merge( MNC, ., by = c("Symbol", "Protein_ID") ) %>%
+    dplyr::rename( MNC_Score = Score ) %>%
+    dplyr::select(-Method) %>% 
+    merge( MCC, ., by = c("Symbol", "Protein_ID") ) %>%
+    dplyr::rename( MCC_Score = Score ) %>%
+    dplyr::select(-Method) %>% 
+    dplyr::arrange( desc( MNC_Score ) )
+
+head(hub_common)
+```
+
+```{r Ti_commom hub_genes save}
+write.csv(hub_common, file="../PPI_network/hub_genes/common-hub/common.csv", quote = F, row.names = F)
+```
+
+### Enrichment
+
+
+```{r hub_genes, GO}
+hub <- clusterProfiler::bitr(hub_common$Symbol, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db" ) %>%
+  dplyr::select( ENTREZID ) %>%
+  dplyr::rename( Entrez = ENTREZID )
+
+hub_GO = enrichGO(hub$Entrez, ont = "BP", OrgDb = org.Hs.eg.db, pAdjustMethod = "BH", pvalueCutoff  = 0.01,
+                           qvalueCutoff  = 0.05, readable = TRUE)
+                           
+
+hub.common_GO <- dotplot(hub_GO, showCategory = 10) +
+  scale_color_gradientn(colours=c("#f7ca64", "#46bac2", "#371ea3"),
+  guide=guide_colorbar(reverse=TRUE, order=1)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme(panel.grid.major.y = element_line(linetype='dotted', color='#808080'),
+  axis.text.y = element_text(size = 18), axis.text.x = element_text(size = 18),
+  axis.title.x = element_text(size = 24), panel.grid.major.x = element_blank()) +
+  theme(strip.text.x = element_text(size = 24), strip.text.y = element_text(size = 24),
+  legend.title = element_text(size = 26, face = "bold"), legend.text = element_text(size = 22),
+  plot.title = element_text(size = 28, hjust = 0.5)) +
+  ggtitle("Biological Process")
+hub.common_GO
+
+ggsave("../PPI_network/hub_genes/common-hub//enrichment/GO/GO_hub.pdf", plot = hub.common_GO, dpi = 600, width = 9, height = 8)
+```
+
+```{r hub_genes, save}
+
+hub_genes_GO <- hub_GO@result
+
+write.table(hub_genes_GO, file="../PPI_network/hub_genes/common-hub//enrichment/GO/GO_hub.csv", quote = F, row.names = F, sep = ";")
+
+```
+
+
+## Session info
+
+```{r session_information}
+Sys.time()
+getwd()
+  
+sessionInfo()
+```

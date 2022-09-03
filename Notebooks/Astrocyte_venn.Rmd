@@ -1,0 +1,416 @@
+---
+title: "Identification of overlapping differentially expressed genes associated with Palmitic Acid"
+output: html_notebook
+author: Alexis Felipe Rojas Cruz
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	fig.keep = 'all',
+	dpi = 600,
+	fig.width = 11,
+	fig.height = 8.5
+)
+```
+
+After expression analysis, we obtained the following results
+
+|No.|Versus	                                                  |Total DEGs	  |Up DEGs     |Down DEGs    |
+|:--|:--------------------------------------------------------|:-----------:|:----------:|:-----------:|
+|1	|AstroVH vs AstroDMEM                                     |148	        |101         |47           |
+|2	|AstroDMEM vs AstroVH                                     |148	        |47          |101          |
+|3	|AstroTi vs AstroDMEM                                     |0	          |0	         |0            |
+|4	|AstroTi vs AstroVH 	                                    |148          |53	         |95           |
+|5	|(AstroTi vs AstroDMEM) vs (AstroVH vs AstroDMEM) 	      |148          |53	         |95           |
+|6	|AstroPA vs AstroDMEM                                   	|1064	        |538	       |526          |
+|7  |AstroPA vs AstroVH	                                      |739	        |366	       |373          |
+|8	|AstroTiPA vs AstroDMEM                    	              |1302	        |590	       |712          |
+|9  |AstroTiPA vs AstroVH	                                    |1052	        |442	       |610          |
+|10	|AstroPA vs AstroTi	                                      |1128	        |527  	     |601          |
+|11	|AstroPA vs AstroTiPA	                                    |0	          |0	         |0            |
+|12	|(AstroPA - AstroDMEM) vs (AstroTi - AstroDMEM)	          |1128	        |527  	     |601          |
+|13	|(AstroPA - AstroVH) vs (AstroTi - AstroVH)             	|1128	        |527  	     |601          |
+|14	|(AstroPA - AstroDMEM) vs (AstroTiPA - AstroDMEM)	        |0	          |0	         |0            |
+|15	|(AstroPA - AstroVH) vs (AstroTiPA - AstroVH)	            |0	          |0	         |0            |
+
+
+```{r include=FALSE, comment = ""}
+if (!("ggVennDiagram" %in% rownames(installed.packages()))){
+    install.packages("ggVennDiagram")
+}
+if (!("sf" %in% rownames(installed.packages()))){
+    install.packages("sf")
+}
+if (!("RColorBrewer" %in% rownames(installed.packages()))){
+    install.packages("RColorBrewer")
+}
+if (!("tidyverse" %in% rownames(installed.packages()))){
+    install.packages("tidyverse")
+}
+if (!("ggplot2" %in% rownames(installed.packages()))){
+    install.packages("ggplot2")
+}
+if (!("ggrepel" %in% rownames(installed.packages()))){
+    install.packages("ggrepel")
+}
+if (!("devtools" %in% rownames(installed.packages()))){
+    install.packages("devtools")
+}
+if (!("ggsci" %in% rownames(installed.packages()))){
+    install.packages("ggsci")
+}
+
+library(ggVennDiagram)
+library(sf)
+library(RColorBrewer)
+library(tidyverse)
+library(ggplot2)
+library(devtools)
+library(ggsci)
+```
+
+## Loading data
+
+Here we will analyze differentially expressed tibolone genes which have a neuroprotective effect against palmitic acid-treated astrocytes, considered as one of the most abundant acids in our diet
+
+`Tibolone` = Considering that VH may regulate DEGs that do not correspond to the action of Tibolone, it was compared with DMEMvsVH to deduce possible DEGs induced by Tibolone.
+
+`Tibolone + Palmitic Acid` = To verify if in effect the DEGs resulting from the TivsVH contrast are associated with Tibolone, we compared them with the unique Tibolone contrast which is TiPAvsVH to assess whether the DEGs match or not. 
+
+`Palmitic Acid` = The lipotoxic effect of Palmitic Acid on astrocytes will be evaluated
+
+Thus, the following contrast be analyzed:
+
+`TIBOLONE`
+- `AstroVH vs AstroDMEM`
+- `AstroTi vs AstroVH`
+
+`TIBOLONE + PALMITIC ACID`
+- `AstroTiPA vs AstroVH`
+- `AstroPA vs AstroVH`
+- `AstroVH vs AstroDMEM`
+- `AstroTi vs AstroVH`
+
+`PALMITIC ACID`
+- `AstroTiPA vs AstroVH`
+- `AstroPA vs AstroVH`
+
+
+```{r data}
+TivsVH <- read.csv("../Expression/DEGs/TIBvsVH.csv", sep = ",", header = T)
+DMEMvsVH <- read.csv("../Expression/DEGs/DMEMvsVH.csv", sep = ",", header = T)
+TiPAvsVH <- read.csv("../Expression/DEGs/TIBPAvsVH.csv", sep = ",", header = T)
+PAvsVH <- read.csv("../Expression/DEGs/PAvsVH.csv", sep = ",", header = T)
+```
+
+# Contrasting DEGs associated wih Tibolone
+
+## Up-regulated
+
+
+```{r listTi_up, message=FALSE}
+devtools::install_github("gaospecial/ggVennDiagram", force = TRUE)
+
+Tiup <- list(
+  "TIBvsVH" = dplyr::filter(TivsVH, regulation == "Up") %>% 
+                               dplyr::pull( gene_id ),
+  "DMEMvsVH" = dplyr::filter(DMEMvsVH, regulation == "Up") %>% 
+                               dplyr::pull( gene_id )
+             ) %>%
+  RVenn::Venn() %>% 
+  ggVennDiagram::process_data()
+Tiup
+```
+
+Now, we will build the Venn diagram
+
+```{r Tivenn_up}
+Tiup_venn <- ggplot() +
+  geom_sf(aes(fill = count), 
+          data = ggVennDiagram::venn_region(Tiup)) +
+  geom_sf(aes(color = id), size = 1,
+          data = ggVennDiagram::venn_setedge(Tiup), show.legend = FALSE) +
+  geom_sf_text(aes(label = name), size = 14, fontface = "bold", 
+          data = ggVennDiagram::venn_setlabel(Tiup)) +
+  geom_sf_text(aes(label = count), size = 14, 
+          data = ggVennDiagram::venn_region(Tiup)) +
+  ggplot2::scale_fill_gradient(low="HoneyDew", high = "LightBlue") +
+  theme_void() +
+  theme(legend.position = "none") +
+  scale_colour_manual(values = c("Black", "Black")) +
+  coord_sf(clip = "off")
+  
+
+ggsave("../Overlapping/venn/TIB_up.pdf", plot = Tiup_venn, dpi = 600, width = 12, height = 8)
+```
+
+
+## Down-regulated
+
+```{r listTi_down, message=FALSE}
+
+Tidown <- list(
+  "TIBvsVH" = dplyr::filter(TivsVH, regulation == "Down") %>% 
+                               dplyr::pull( gene_id ),
+  "DMEMvsVH" = dplyr::filter(DMEMvsVH, regulation == "Down") %>% 
+                               dplyr::pull( gene_id )
+             ) %>%
+  RVenn::Venn() %>% 
+  ggVennDiagram::process_data()
+Tidown
+```
+
+
+```{r Tivenn_down}
+Tidown_venn <- ggplot() +
+  geom_sf(aes(fill = count), 
+          data = ggVennDiagram::venn_region(Tidown)) +
+  geom_sf(aes(color = id), size = 1,
+          data = ggVennDiagram::venn_setedge(Tidown), show.legend = FALSE) +
+  geom_sf_text(aes(label = name), size = 14, fontface = "bold", 
+          data = ggVennDiagram::venn_setlabel(Tidown)) +
+  geom_sf_text(aes(label = count), size = 14, 
+          data = ggVennDiagram::venn_region(Tidown)) +
+  ggplot2::scale_fill_gradient(low="HoneyDew", high = "LightBlue") +
+  theme_void() +
+  theme(legend.position = "none") +
+  scale_colour_manual(values = c("Black", "Black")) +
+  coord_sf(clip = "off")
+  
+
+ggsave("../Overlapping/venn/TIB_down.pdf", plot = Tidown_venn, dpi = 600, width = 12, height = 8)
+```
+
+
+# Check of DEGs associated wih Tibolone based on Tibolone + Palmitic Acid
+
+## Up-regulated
+
+
+```{r listTiPA_up, message=FALSE}
+
+TiPAup <- list(
+  "PAvsVH" = dplyr::filter(PAvsVH, regulation == "Up") %>% 
+                               dplyr::pull( gene_id ),
+  "TIBPAvsVH" = dplyr::filter(TiPAvsVH, regulation == "Up") %>% 
+                               dplyr::pull( gene_id ),
+  "TIBvsVH" = dplyr::filter(TivsVH, regulation == "Up") %>% 
+                               dplyr::pull( gene_id ),
+  "DMEMvsVH" = dplyr::filter(DMEMvsVH, regulation == "Up") %>% 
+                               dplyr::pull( gene_id )
+             ) %>%
+  RVenn::Venn() %>% 
+  ggVennDiagram::process_data()
+TiPAup
+```
+
+
+```{r TiPAvenn_up}
+TiPAup_venn <- ggplot() +
+  geom_sf(aes(fill = count), 
+          data = ggVennDiagram::venn_region(TiPAup)) +
+  geom_sf(aes(color = id), size = 1,
+          data = ggVennDiagram::venn_setedge(TiPAup), show.legend = FALSE) +
+  geom_sf_text(aes(label = name), size = 14, fontface = "bold", 
+          data = ggVennDiagram::venn_setlabel(TiPAup)) +
+  geom_sf_text(aes(label = count), size = 14, 
+          data = ggVennDiagram::venn_region(TiPAup)) +
+  ggplot2::scale_fill_gradient(low="HoneyDew", high = "LightBlue") +
+  theme_void() +
+  theme(legend.position = "none") +
+  scale_colour_manual(values = c("Black", "Black", "Black", "Black")) +
+  coord_sf(clip = "off")
+  
+
+ggsave("../Overlapping/venn/TIBPA_up.pdf", plot = TiPAup_venn, dpi = 600, width = 12.5, height = 8)
+
+TiPAup@region[["item"]][[8]]
+```
+
+
+## Down-regulated
+
+```{r listTiPA_down, message=FALSE}
+
+TiPAdown <- list(
+  "PAvsVH" = dplyr::filter(PAvsVH, regulation == "Down") %>% 
+                               dplyr::pull( gene_id ),
+  "TiPAvsVH" = dplyr::filter(TiPAvsVH, regulation == "Down") %>% 
+                               dplyr::pull( gene_id ),
+  "TivsVH" = dplyr::filter(TivsVH, regulation == "Down") %>% 
+                               dplyr::pull( gene_id ),
+  "DMEMvsVH" = dplyr::filter(DMEMvsVH, regulation == "Down") %>% 
+                               dplyr::pull( gene_id )
+             ) %>%
+  RVenn::Venn() %>% 
+  ggVennDiagram::process_data()
+TiPAdown
+```
+
+```{r TiPAvenn_down}
+TiPAdown_venn <- ggplot() +
+  geom_sf(aes(fill = count), 
+          data = ggVennDiagram::venn_region(TiPAdown)) +
+  geom_sf(aes(color = id), size = 1,
+          data = ggVennDiagram::venn_setedge(TiPAdown), show.legend = FALSE) +
+  geom_sf_text(aes(label = name), size = 14, fontface = "bold", 
+          data = ggVennDiagram::venn_setlabel(TiPAdown)) +
+  geom_sf_text(aes(label = count), size = 14, 
+          data = ggVennDiagram::venn_region(TiPAdown)) +
+  ggplot2::scale_fill_gradient(low="HoneyDew", high = "LightBlue") +
+  theme_void() +
+  theme(legend.position = "none") +
+  scale_colour_manual(values = c("Black", "Black", "Black", "Black")) +
+  coord_sf(clip = "off")
+  
+
+ggsave("../Overlapping/venn/TIBPA_down.pdf", plot = TiPAdown_venn, dpi = 600, width = 12.5, height = 8)
+```
+
+
+# DEGs associated wih Palmitic Acid
+
+## Up-regulated
+
+
+```{r listPA_up, message=FALSE}
+
+PAup <- list(
+  "PAvsVH" = dplyr::filter(PAvsVH, regulation == "Up") %>% 
+                               dplyr::pull( gene_id ),
+  "TiPAvsVH" = dplyr::filter(TiPAvsVH, regulation == "Up") %>% 
+                               dplyr::pull( gene_id )
+             ) %>%
+  RVenn::Venn() %>% 
+  ggVennDiagram::process_data()
+PAup
+```
+
+```{r PAvenn_up}
+PAup_venn <- ggplot() +
+  geom_sf(aes(fill = count), 
+          data = ggVennDiagram::venn_region(PAup)) +
+  geom_sf(aes(color = id), size = 1,
+          data = ggVennDiagram::venn_setedge(PAup), show.legend = FALSE) +
+  geom_sf_text(aes(label = name), size = 14, fontface = "bold", 
+          data = ggVennDiagram::venn_setlabel(PAup)) +
+  geom_sf_text(aes(label = count), size = 14, 
+          data = ggVennDiagram::venn_region(PAup)) +
+  ggplot2::scale_fill_gradient(low="HoneyDew", high = "LightBlue") +
+  theme_void() +
+  theme(legend.position = "none") +
+  scale_colour_manual(values = c("Black", "Black")) +
+  coord_sf(clip = "off")
+  
+
+ggsave("../Overlapping/venn/PA_up.pdf", plot = PAup_venn, dpi = 600, width = 12, height = 8)
+```
+
+```{r PA-interception_UP}
+
+PAUp_TiPAvsVH <- TiPAvsVH %>%
+  dplyr::filter(regulation == "Up") %>% 
+                               dplyr::select( gene_id, symbol, biotype, logFC, PValue, FDR )
+PAUp_PAvsVH <- PAvsVH %>%
+  dplyr::filter(regulation == "Up") %>% 
+                               dplyr::select( gene_id, symbol, biotype, logFC, PValue, FDR )
+
+PA_common.up <- PAUp_TiPAvsVH %>%
+    dplyr::rename( TiPAvsVH_symbol = symbol, TiPAvsVH_biotype = biotype,
+                   TiPAvsVH_logFC = logFC, TiPAvsVH_PValue = PValue, TiPAvsVH_FDR = FDR ) %>%
+    merge( PAUp_PAvsVH, ., by = "gene_id" ) %>%
+    dplyr::rename( PAvsVH_symbol = symbol, PAvsVH_biotype = biotype,
+                   PAvsVH_logFC = logFC, PAvsVH_PValue = PValue, PAvsVH_FDR = FDR ) %>%
+    dplyr::select( -c( TiPAvsVH_symbol, TiPAvsVH_biotype ) ) %>% 
+    dplyr::arrange( TiPAvsVH_FDR, PAvsVH_FDR )
+   
+
+PA_DEGup <- PAUp_PAvsVH %>%
+  dplyr::rename( PAvsVH_symbol = symbol, PAvsVH_biotype = biotype,
+                   PAvsVH_logFC = logFC, PAvsVH_PValue = PValue, PAvsVH_FDR = FDR ) %>% 
+  dplyr::anti_join( PA_common.up, by = "gene_id" ) %>%
+  dplyr::bind_rows( PA_common.up) %>% 
+  dplyr::arrange( TiPAvsVH_FDR, PAvsVH_FDR )
+
+
+write.table(PA_DEGup, file="../Overlapping/overlap_DEGs/PA-DEG_up.csv", quote = F, row.names = F, sep = ",")
+head(PA_DEGup) 
+```
+
+## Down-regulated
+
+
+```{r listPA_down, message=FALSE}
+
+PAdown <- list(
+  "PAvsVH" = dplyr::filter(PAvsVH, regulation == "Down") %>% 
+                               dplyr::pull( gene_id ),
+  "TiPAvsVH" = dplyr::filter(TiPAvsVH, regulation == "Down") %>% 
+                               dplyr::pull( gene_id )
+             ) %>%
+  RVenn::Venn() %>% 
+  ggVennDiagram::process_data()
+PAdown
+```
+
+```{r PAvenn_down}
+PAdown_venn <- ggplot() +
+  geom_sf(aes(fill = count), 
+          data = ggVennDiagram::venn_region(PAdown)) +
+  geom_sf(aes(color = id), size = 1,
+          data = ggVennDiagram::venn_setedge(PAdown), show.legend = FALSE) +
+  geom_sf_text(aes(label = name), size = 14, fontface = "bold", 
+          data = ggVennDiagram::venn_setlabel(PAdown)) +
+  geom_sf_text(aes(label = count), size = 14, 
+          data = ggVennDiagram::venn_region(PAdown)) +
+  ggplot2::scale_fill_gradient(low="HoneyDew", high = "LightBlue") +
+  theme_void() +
+  theme(legend.position = "none") +
+  scale_colour_manual(values = c("Black", "Black")) +
+  coord_sf(clip = "off")
+  
+
+ggsave("../Overlapping/venn/PA_down.pdf", plot = PAdown_venn, dpi = 600, width = 12, height = 8)
+```
+
+```{r PA-interception_DOWN}
+
+PAUp_TiPAvsVH <- TiPAvsVH %>%
+  dplyr::filter(regulation == "Down") %>% 
+                               dplyr::select( gene_id, symbol, biotype, logFC, PValue, FDR )
+PAUp_PAvsVH <- PAvsVH %>%
+  dplyr::filter(regulation == "Down") %>% 
+                               dplyr::select( gene_id, symbol, biotype, logFC, PValue, FDR )
+
+PA_common.down <- PAUp_TiPAvsVH %>%
+    dplyr::rename( TiPAvsVH_symbol = symbol, TiPAvsVH_biotype = biotype,
+                   TiPAvsVH_logFC = logFC, TiPAvsVH_PValue = PValue, TiPAvsVH_FDR = FDR ) %>%
+    merge( PAUp_PAvsVH, ., by = "gene_id" ) %>%
+    dplyr::rename( PAvsVH_symbol = symbol, PAvsVH_biotype = biotype,
+                   PAvsVH_logFC = logFC, PAvsVH_PValue = PValue, PAvsVH_FDR = FDR ) %>%
+    dplyr::select( -c( TiPAvsVH_symbol, TiPAvsVH_biotype ) ) %>% 
+    dplyr::arrange( TiPAvsVH_FDR, PAvsVH_FDR )
+   
+
+PA_DEGdown <- PAUp_PAvsVH %>%
+  dplyr::rename( PAvsVH_symbol = symbol, PAvsVH_biotype = biotype,
+                   PAvsVH_logFC = logFC, PAvsVH_PValue = PValue, PAvsVH_FDR = FDR ) %>% 
+  dplyr::anti_join( PA_common.down, by = "gene_id" ) %>%
+  dplyr::bind_rows( PA_common.down) %>% 
+  dplyr::arrange( TiPAvsVH_FDR, PAvsVH_FDR )
+
+
+write.table(PA_DEGdown, file="../Overlapping/overlap_DEGs/PA-DEG_down.csv", quote = F, row.names = F, sep = ",")
+head(PA_DEGdown)  
+```
+
+## Session info
+
+```{r session_information}
+Sys.time()
+getwd()
+  
+sessionInfo()
+```

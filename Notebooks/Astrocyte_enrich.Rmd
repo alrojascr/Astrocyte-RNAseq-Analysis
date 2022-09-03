@@ -1,0 +1,461 @@
+---
+title: "Enrichment analysis for astrocytes"
+output: html_notebook
+author: Alexis Felipe Rojas Cruz
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	fig.keep = 'all',
+	dpi = 600,
+	fig.width = 11,
+	fig.height = 8.5
+)
+```
+
+The purpose of Venn diagrams is to identify shared DEGs with a variety of contrasts and related treatments. For this study, we found that Tibolone has no effect on astrocytes treated with Palmitic Acid. Based on the Venn diagram analyses, it was found the Palmitic Acid induced DEGs listed below to perform the enrichment analysis 
+
+
+
+|No.| Treatment	               |Contrast	                                                        |Up DEGs     |Down DEGs    |
+|:--|:-------------------------|:------------------------------------------------------------|:----------:|:-----------:|
+|1	|Palmitic Acid	           |AstroTIBPA vs AstroVH, AstroPA vs AstroVH                    |366         |373          |
+
+
+
+
+```{r include=FALSE, comment = ""}
+if (!("clusterProfiler" %in% rownames(installed.packages()))){
+    install.packages("clusterProfiler")
+}
+if (!("org.Hs.eg.db" %in% rownames(installed.packages()))){
+    install.packages("org.Hs.eg.db")
+}
+if (!("biomaRt" %in% rownames(installed.packages()))){
+    install.packages("biomaRt")
+}
+if (!("GOplot" %in% rownames(installed.packages()))){
+    install.packages("GOplot")
+}
+if (!("RColorBrewer" %in% rownames(installed.packages()))){
+    install.packages("RColorBrewer")
+}
+if (!("tidyverse" %in% rownames(installed.packages()))){
+    install.packages("tidyverse")
+}
+if (!("ggplot2" %in% rownames(installed.packages()))){
+    install.packages("ggplot2")
+}
+if (!("ggrepel" %in% rownames(installed.packages()))){
+    install.packages("ggrepel")
+}
+if (!("ggsci" %in% rownames(installed.packages()))){
+    install.packages("ggsci")
+}
+if (!("cowplot" %in% rownames(installed.packages()))){
+    install.packages("cowplot")
+}
+if (!("DOSE" %in% rownames(installed.packages()))){
+    install.packages("DOSE")
+}
+if (!("ggh4x" %in% rownames(installed.packages()))){
+    install.packages("ggh4x")
+}
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("ReactomePA")
+
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(biomaRt)
+library(GOplot)
+library(RColorBrewer)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(ggsci)
+library(cowplot)
+library(ReactomePA)
+library(DOSE)
+library(ggh4x)
+```
+
+## Loading data
+
+We will employ the intercepts of the shared DEGs across contrasts for the treatment of PA involving up- and down-regulated genes. In addition, filtered genes obtained by differential expression analysis will be included to perform overrepresentation
+
+```{r data}
+PA_up <- read.csv("../Overlapping/overlap_DEGs/PA-DEG_up.csv", sep = ",", header = T)
+PA_down <- read.csv("../Overlapping/overlap_DEGs/PA-DEG_down.csv", sep = ",", header = T)
+
+univ <- read.csv("../Expression/Annotation/allgenesfilt.csv", sep = ",", header = T)
+```
+
+# Over-representation Analyses (ORA)
+
+Over-representation (or enrichment) analysis is a statistical method that determines whether genes from pre-defined sets (ex: those belonging to a specific GO term or pathway) are present more than would be expected (over-represented) in a subset of your data
+
+## Preparing data
+
+```{r preparing, message=FALSE, warning=FALSE}
+
+# Palmitic Acid
+PAup_org <- clusterProfiler::bitr(PA_up$PAvsVH_symbol, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db" ) %>%
+  dplyr::select( ENTREZID ) %>%
+  dplyr::rename( Entrez = ENTREZID ) %>% 
+  add_column( Treatment = "PA", Regulation = "Up" )
+
+PAdown_org <- clusterProfiler::bitr(PA_down$PAvsVH_symbol, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db" ) %>%
+  dplyr::select( ENTREZID ) %>%
+  dplyr::rename( Entrez = ENTREZID ) %>%
+  add_column( Treatment = "PA", Regulation = "Down" )
+
+mart <- useMart(biomart="ENSEMBL_MART_ENSEMBL", path="/biomart/martservice", dataset="hsapiens_gene_ensembl")
+symbols <- getBM(values=univ$gene_id, filters= "ensembl_gene_id", attributes= c("ensembl_gene_id", "hgnc_symbol","entrezgene_id"), mart= mart)
+
+# Universe
+univ_enrich <- symbols %>%
+  dplyr::rename( gene_id = ensembl_gene_id ) %>%
+  dplyr::rename( Entrez = entrezgene_id ) %>%
+  merge( univ, ., by="gene_id" ) %>%
+  dplyr::select( Entrez ) %>% 
+  as.data.frame( . ) %>%
+  unique( . )
+
+```
+
+To create a single dataset for our DEGs, we will merge the different data frames
+
+
+```{r dataset}
+
+astro_enrich <- dplyr::bind_rows( PAup_org, PAdown_org )
+head(astro_enrich)
+  
+```
+
+
+## GO Terms
+
+`clusterProfiler` was developed for biological theme comparison, and it provides a function, `compareCluster`, to automatically calculate enriched functional categories of each gene clusters. This is an innovative analysis which enables us to compare DEGs by rormula interface _Entrez∼group  or Entrez∼group+othergroup_ and provides differences and similarities among the groups we are studying.
+
+```{r GO_terms}
+
+compareGO = compareCluster(Entrez ~ Treatment+Regulation, data = astro_enrich,  fun ="enrichGO",
+                           ont = "ALL", OrgDb = org.Hs.eg.db, pAdjustMethod = "BH", pvalueCutoff  = 0.01,
+                           qvalueCutoff  = 0.05, readable = TRUE)
+
+
+p1 <- dotplot(compareGO, x="Treatment",split = "ONTOLOGY", showCategory = 5) +
+  aes(x=fct_relevel(Treatment, c('PA'))) + xlab(NULL) +
+  facet_grid(vars(ONTOLOGY), vars(factor(Regulation, levels = c("Up", "Down"))),
+  scale = "free", space = "free") +
+  scale_color_gradientn(colours=c("#f7ca64", "#46bac2", "#371ea3"),
+  guide=guide_colorbar(reverse=TRUE, order=1)) +
+  force_panelsizes(cols = c(0.01, 0.01)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme(panel.grid.major.y = element_line(linetype='dotted', color='#808080'),
+  axis.text.y = element_text(size = 18), axis.text.x = element_text(size = 28),
+  panel.grid.major.x = element_blank()) +
+  theme(strip.text.x = element_text(size = 24), strip.text.y = element_text(size = 24),
+  legend.title = element_text(size = 26, face = "bold"), legend.text = element_text(size = 22))
+p1
+
+ggsave("../Enrichment/enrich_plots/enrichGO.pdf", plot = p1, dpi = 600, width = 9, height = 19)
+```
+
+
+```{r save enrich GO}
+
+GO_PA <- compareGO@compareClusterResult %>% 
+  filter( compareGO@compareClusterResult$Treatment == "PA" ) %>%
+  arrange( desc(Regulation) )
+
+write.csv(GO_PA, file="../Enrichment/enrich_GO/GO_PA.csv", quote = F, row.names = F)
+```
+
+## KEGG Pathway
+
+```{r KEGG}
+
+compareKEGG = compareCluster(Entrez ~ Treatment+Regulation, data = astro_enrich, fun ="enrichKEGG",
+                           organism = "hsa", pAdjustMethod = 'BH', pvalueCutoff = 0.01, qvalueCutoff  = 0.05)
+
+p2 <- dotplot(compareKEGG, x="Treatment", showCategory = 7) +
+  aes(x=fct_relevel(Treatment, c('PA'))) + xlab(NULL) +
+  facet_grid(~factor(Regulation, levels = c("Up", "Down")), scale = "free", space = "free") +
+  scale_color_gradientn(colours=c("#f7ca64", "#46bac2", "#371ea3"),
+  guide=guide_colorbar(reverse=TRUE, order=1)) +
+  force_panelsizes(cols = c(0.01, 0.01)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme(panel.grid.major.y = element_line(linetype='dotted', color='#808080'),
+  axis.text.y = element_text(size = 18), axis.text.x = element_text(size = 28),
+  panel.grid.major.x = element_blank()) +
+  theme(strip.text.x = element_text(size = 24), strip.text.y = element_text(size = 24),
+  legend.title = element_text(size = 26, face = "bold"), legend.text = element_text(size = 22))
+p2
+
+ggsave("../Enrichment/enrich_plots/enrichKEGG.pdf", plot = p2, dpi = 600, width = 9, height = 6)
+```
+
+```{r save enrich KEGG}
+
+KEGG_PA <- compareKEGG@compareClusterResult %>% 
+  filter( compareKEGG@compareClusterResult$Treatment == "PA" ) %>%
+  arrange( desc(Regulation) )
+
+write.csv(KEGG_PA, file="../Enrichment/enrich_KEGG/KEGG_PA.csv", quote = F, row.names = F)
+```
+
+## WikiPathways
+
+```{r Wiki}
+
+compareWP <- compareCluster(Entrez ~ Treatment+Regulation, data = astro_enrich, fun ="enrichWP",
+                           organism = "Homo sapiens", pAdjustMethod = 'BH', pvalueCutoff = 0.01, qvalueCutoff  = 0.05)
+
+p3 <- dotplot(compareWP, x="Treatment", showCategory = 7) +
+  aes(x=fct_relevel(Treatment, c('PA'))) + xlab(NULL) +
+  facet_grid(~factor(Regulation, levels = c("Up", "Down")), scale = "free", space = "free") +
+  scale_color_gradientn(colours=c("#f7ca64", "#46bac2", "#371ea3"),
+  guide=guide_colorbar(reverse=TRUE, order=1)) +
+  force_panelsizes(cols = c(0.01, 0.01)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme(panel.grid.major.y = element_line(linetype='dotted', color='#808080'),
+  axis.text.y = element_text(size = 18), axis.text.x = element_text(size = 28),
+  panel.grid.major.x = element_blank()) +
+  theme(strip.text.x = element_text(size = 24), strip.text.y = element_text(size = 24),
+  legend.title = element_text(size = 26, face = "bold"), legend.text = element_text(size = 22))
+p3
+
+ggsave("../Enrichment/enrich_plots/enrichWP.pdf", plot = p3, dpi = 600, width = 9, height = 7.5)
+```
+
+```{r save enrich Wiki}
+
+Wiki_PA <- compareWP@compareClusterResult %>% 
+  filter( compareWP@compareClusterResult$Treatment == "PA" ) %>%
+  arrange( desc(Regulation) )
+
+write.csv(Wiki_PA, file="../Enrichment/enrich_Wiki/Wiki_PA.csv", quote = F, row.names = F)
+```
+
+
+## Reactome
+
+```{r Reactome}
+
+compareRE <- compareCluster(Entrez ~ Treatment+Regulation, data = astro_enrich, fun ="enrichPathway",
+                           organism = "human", pAdjustMethod = 'BH', pvalueCutoff = 0.01, qvalueCutoff  = 0.05)
+
+p4 <- dotplot(compareRE, x="Treatment", showCategory = 7) +
+  aes(x=fct_relevel(Treatment, c('PA'))) + xlab(NULL) +
+  facet_grid(~factor(Regulation, levels = c("Up", "Down")), scale = "free", space = "free") +
+  scale_color_gradientn(colours=c("#f7ca64", "#46bac2", "#371ea3"),
+  guide=guide_colorbar(reverse=TRUE, order=1)) +
+  force_panelsizes(cols = c(0.01, 0.01)) +
+  guides(size = guide_legend(override.aes=list(shape=1))) +
+  theme(panel.grid.major.y = element_line(linetype='dotted', color='#808080'),
+  axis.text.y = element_text(size = 18), axis.text.x = element_text(size = 28),
+  panel.grid.major.x = element_blank()) +
+  theme(strip.text.x = element_text(size = 24), strip.text.y = element_text(size = 24),
+  legend.title = element_text(size = 26, face = "bold"), legend.text = element_text(size = 22))
+p4
+
+ggsave("../Enrichment/enrich_plots/enrichRE.pdf", plot = p4, dpi = 600, width = 9, height = 6)
+```
+
+```{r save enrich RE}
+RE_PA <- compareRE@compareClusterResult %>% 
+  filter( compareRE@compareClusterResult$Treatment == "PA" ) %>%
+  arrange( desc(Regulation) )
+
+write.csv(RE_PA, file="../Enrichment/enrich_RE/RE_PA.csv", quote = F, row.names = F)
+```
+
+
+# GoChord
+
+
+## Palmitic Acid
+
+
+```{r data preparation PA}
+
+#Upregulated
+PAup_process <- GO_PA %>% 
+  dplyr::filter( Regulation == "Up") %>%
+  dplyr::select( ONTOLOGY, ID, Description, geneID, p.adjust ) %>% 
+  dplyr::rename( category = ONTOLOGY ) %>%
+  dplyr::rename( term = Description ) %>%
+  dplyr::rename( genes = geneID ) %>%
+  dplyr::rename( adj_pval = p.adjust ) %>%
+  dplyr::mutate( genes = str_replace_all(genes, '/', ',') ) %>% 
+  dplyr::slice(1:8) %>% 
+  data.frame( . )
+
+PAup_genes <- data.frame(ID=PA_up$PAvsVH_symbol, logFC=PA_up$PAvsVH_logFC, logFC2=PA_up$TiPAvsVH_logFC)
+
+PAup_circ <- circle_dat(PAup_process, PAup_genes)
+
+#Downregulated  
+PAdown_process <- GO_PA %>% 
+  dplyr::filter( Regulation == "Down") %>%
+  dplyr::select( ONTOLOGY, ID, Description, geneID, p.adjust ) %>% 
+  dplyr::rename( category = ONTOLOGY ) %>%
+  dplyr::rename( term = Description ) %>%
+  dplyr::rename( genes = geneID ) %>%
+  dplyr::rename( adj_pval = p.adjust ) %>%
+  dplyr::mutate( genes = str_replace_all(genes, '/', ',') ) %>% 
+  dplyr::slice(1:8) %>% 
+  data.frame( . )
+
+PAdown_genes <- data.frame(ID=PA_down$PAvsVH_symbol, logFC=PA_down$PAvsVH_logFC, logFC2=PA_down$TiPAvsVH_logFC)
+
+PAdown_circ <- circle_dat(PAdown_process, PAdown_genes)
+```
+
+```{r format PA}
+PAup_data <- chord_dat(data = PAup_circ, genes = PAup_genes)
+PAdown_data <- chord_dat(data = PAdown_circ, genes = PAdown_genes)
+head(PAdown_data)
+
+```
+
+### Upregulated
+
+```{r GOChord PAup}
+
+PAup_chord <- GOChord(data=PAup_data, space=0.1, limit = c(7, 1), gene.order="logFC",
+          gene.size=6, gene.space=0.2,border.size=0.15,
+          lfc.col=c('red','white'), process.label=8, 
+          ribbon.col = brewer.pal(length(PAup_process$term),"Set2"),
+          lfc.min=min(PAup_genes$logFC),lfc.max=max(PAup_genes$logFC))
+
+# extracting fold change legend
+FCLeg <- get_legend(PAup_chord+guides(size="none")+
+    theme(legend.position = c(0.13,-0.25), 
+    legend.direction = "horizontal"))
+
+#Format functional terms legend
+PAup_chord <-PAup_chord+guides(size = guide_legend("GO Terms", ncol = 1, byrow = T, 
+                               override.aes = list(shape = 22, fill = unique(brewer.pal(length(PAup_process$term),"Set2")),
+                               size = 8)), fill="none")+
+  theme(legend.key.size = unit(0.01, 'cm'), legend.text = element_text(size=14),
+        legend.title = element_text(size=18, face="bold"))
+
+#extracting functional terms legend
+FuncLeg <- cowplot::get_legend(PAup_chord+guides(color="none")+
+     theme(legend.box.margin =unit(c(0,0,0,0), "cm"),
+     legend.spacing = unit(c(-0.1,-0.1,-0.1,-0.1), "cm"),
+     legend.position="right", legend.text = element_text(size = 22),
+     legend.direction = "vertical"))
+
+# final plot
+fPA_up <- plot_grid(FCLeg,
+    plot_grid(PAup_chord+theme(legend.position = "none", 
+    plot.margin = unit(c(0.1,0.1,0,0), "cm")),FuncLeg, 
+    ncol=2, rel_widths = c(0.64,0.36)),
+    nrow=2, rel_heights = c(0.07,0.93))
+
+
+ggsave("../Enrichment/GOChord/PA_up.pdf", plot = fPA_up, dpi = 600, width = 16, height = 11)
+```
+
+### Downregulated
+
+```{r GOChord PAdown}
+
+PAdown_chord <- GOChord(data=PAdown_data, space=0.1, limit = c(4.5, 1), gene.order="logFC",
+          gene.size=6, gene.space=0.2,border.size=0.15,
+          lfc.col=c('white','blue'), process.label=8, 
+          ribbon.col = brewer.pal(length(PAdown_process$term),"Set2"),
+          lfc.min=min(PAdown_genes$logFC),lfc.max=max(PAdown_genes$logFC))
+
+# extracting fold change legend
+FCLeg <- get_legend(PAdown_chord+guides(size="none")+
+    theme(legend.position = c(0.13,-0.25), 
+    legend.direction = "horizontal"))
+
+#Format functional terms legend
+PAdown_chord <-PAdown_chord+guides(size = guide_legend("GO Terms", ncol = 1, byrow = T, 
+                               override.aes = list(shape = 22, fill = unique(brewer.pal(length(PAdown_process$term),"Set2")),
+                               size = 8)), fill="none")+
+  theme(legend.key.size = unit(0.01, 'cm'), legend.text = element_text(size=22),
+        legend.title = element_text(size=18, face="bold"))
+
+#extracting functional terms legend
+FuncLeg <- cowplot::get_legend(PAdown_chord+guides(color="none")+
+     theme(legend.box.margin =unit(c(0,0,0,0), "cm"),
+     legend.spacing = unit(c(-0.1,-0.1,-0.1,-0.1), "cm"),
+     legend.position="right",
+     legend.direction = "vertical"))
+
+# final plot
+fPA_down <- plot_grid(FCLeg,
+    plot_grid(PAdown_chord+theme(legend.position = "none", 
+    plot.margin = unit(c(0.1,0.1,0,0), "cm")),FuncLeg, 
+    ncol=2, rel_widths = c(0.64,0.36)),
+    nrow=2, rel_heights = c(0.07,0.93))
+
+
+ggsave("../Enrichment/GOChord/PA_down.pdf", plot = fPA_down, dpi = 600, width = 18, height = 13)
+```
+
+
+# GOBubble
+
+
+## Palmitic Acid
+
+```{r PAup_bubble}
+
+#Upregulated
+PAup_bu <- GO_PA %>% 
+  dplyr::filter( Regulation == "Up") %>%
+  dplyr::select( ONTOLOGY, ID, Description, geneID, p.adjust ) %>% 
+  dplyr::rename( category = ONTOLOGY ) %>%
+  dplyr::rename( term = Description ) %>%
+  dplyr::rename( genes = geneID ) %>%
+  dplyr::rename( adj_pval = p.adjust ) %>%
+  dplyr::mutate( genes = str_replace_all(genes, '/', ',') )
+
+PAup.bu_circ <- circle_dat(PAup_bu, PAup_genes)
+
+PA.bu_up <- GOBubble(PAup.bu_circ, labels = 3)
+ggsave("../Enrichment/GOBubble/PA_up.pdf", plot = PA.bu_up, dpi = 600, width = 20, height = 38)
+```
+
+
+
+```{r PAdown_bubble}
+#Downregulated
+PAdown_bu <- GO_PA %>% 
+  dplyr::filter( Regulation == "Down") %>%
+  dplyr::select( ONTOLOGY, ID, Description, geneID, p.adjust ) %>% 
+  dplyr::rename( category = ONTOLOGY ) %>%
+  dplyr::rename( term = Description ) %>%
+  dplyr::rename( genes = geneID ) %>%
+  dplyr::rename( adj_pval = p.adjust ) %>%
+  dplyr::mutate( genes = str_replace_all(genes, '/', ',') )
+
+PAdown.bu_circ <- circle_dat(PAdown_bu, PAdown_genes)
+
+PA.bu_down <- GOBubble(PAdown.bu_circ, labels = 2)
+ggsave("../Enrichment/GOBubble/PA_down.pdf", plot = PA.bu_down, dpi = 600, width = 15, height = 12)
+```
+
+
+## Session info
+
+```{r session_information}
+Sys.time()
+getwd()
+  
+sessionInfo()
+```

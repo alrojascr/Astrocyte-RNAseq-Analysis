@@ -1,0 +1,1089 @@
+---
+title: "Identifying differentially expressed genes in human astrocytes exposed to Tibolone and Palmitic Acid"
+output: html_notebook
+author: Alexis Felipe Rojas Cruz
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	fig.keep = 'all',
+	dpi = 600,
+	fig.width = 11,
+	fig.height = 8.5
+)
+```
+
+This notebook aims to perform differential expression (DE) analysis of human genes associated with cultures of the Normal Human Astrocyte (NHA) cell line under conditions of lipotoxicity by PA
+
+```{r include=FALSE, comment = ""}
+if (!("edgeR" %in% rownames(installed.packages()))){
+    if (!requireNamespace("BiocManager", quietly = TRUE))
+        install.packages("BiocManager")
+    BiocManager::install("edgeR")
+}
+if (!("limma" %in% rownames(installed.packages()))){
+    if (!requireNamespace("BiocManager", quietly = TRUE))
+        install.packages("BiocManager")
+    BiocManager::install("limma")
+}
+if (!("Glimma" %in% rownames(installed.packages()))){
+    if (!requireNamespace("BiocManager", quietly = TRUE))
+        install.packages("BiocManager")
+    BiocManager::install("Glimma")
+}
+if (!("BiocParallel" %in% rownames(installed.packages()))){
+    if (!requireNamespace("BiocManager", quietly = TRUE))
+        install.packages("BiocManager")
+    BiocManager::install("BiocParallel")
+}
+if (!("biomaRt" %in% rownames(installed.packages()))){
+    if (!requireNamespace("BiocManager", quietly = TRUE))
+        install.packages("BiocManager")
+    BiocManager::install("biomaRt")
+}
+if (!("RColorBrewer" %in% rownames(installed.packages()))){
+    install.packages("RColorBrewer")
+}
+if (!("statmod" %in% rownames(installed.packages()))){
+    install.packages("statmod")
+}
+if (!("tidyverse" %in% rownames(installed.packages()))){
+    install.packages("tidyverse")
+}
+if (!("ggplot2" %in% rownames(installed.packages()))){
+    install.packages("ggplot2")
+}
+if (!("ggrepel" %in% rownames(installed.packages()))){
+    install.packages("ggrepel")
+}
+if (!("circlize" %in% rownames(installed.packages()))){
+    if (!requireNamespace("BiocManager", quietly = TRUE))
+        install.packages("BiocManager")
+    BiocManager::install("circlize")
+}
+if (!("ComplexHeatmap" %in% rownames(installed.packages()))){
+    if (!requireNamespace("BiocManager", quietly = TRUE))
+        install.packages("BiocManager")
+    BiocManager::install("ComplexHeatmap")
+}
+
+library(edgeR)
+library(limma)
+library(Glimma)
+library(BiocParallel)
+library(biomaRt)
+library(RColorBrewer)
+library(statmod)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(circlize)
+library(ComplexHeatmap)
+
+```
+
+## Data preparation
+
+To start it requires as input the gene-level counts matrix
+
+```{r}
+DATA <- read.table(file="../Expression/astrocyte.rsem.gene_tpm.tsv", header=TRUE) 
+head(DATA[,1:6])
+```
+
+We will keep the column containing "gene_id" rather than "transcript_id" for analysis and lots related to R2 and R3
+
+```{r}
+DATA <- DATA[,c(1,5:8,11:14,17:20,23:26,29:32)]
+dim(DATA)
+```
+
+## Pre-filtering
+
+Different RefSeq transcripts for the same gene symbol predominantly have the same reads. Therefore, we keep one transcript for each ID. We choose the transcript with the highest overall count
+
+```{r}
+DATA <- DATA[apply(DATA[,2:ncol(DATA)],1,max) >=2,]
+sort <- order(rowSums((DATA[2:ncol(DATA)])), decreasing=TRUE)
+DATA <- DATA[sort,]
+DATA <- DATA[ !duplicated(DATA$gene_id), ]
+nrow(DATA)
+```
+
+
+## Annotation
+
+```{r gene_annotation}
+mart = useMart(biomart="ENSEMBL_MART_ENSEMBL", path="/biomart/martservice", dataset="hsapiens_gene_ensembl")
+
+ensembl = getBM(
+  values = DATA$gene_id,
+  filters = c("ensembl_gene_id_version"),
+  attributes = c("ensembl_gene_id_version", "ensembl_gene_id", "hgnc_symbol", "gene_biotype"),
+  mart = mart
+)
+
+ensembl <- ensembl[ !duplicated(ensembl$ensembl_gene_id), ]
+
+DATA <- ensembl %>%
+  dplyr::rename( gene_id = ensembl_gene_id_version ) %>%
+  dplyr::rename( symbol = hgnc_symbol ) %>%
+  dplyr::rename( biotype = gene_biotype ) %>%
+  merge( DATA, ., by="gene_id" ) %>%
+  select( -gene_id ) %>%
+  dplyr::rename( gene_id = ensembl_gene_id ) %>%
+  relocate( gene_id, symbol, biotype, .before = AstroDMEM.R2A ) %>% 
+  as.data.frame( . ) %>%
+  unique( . )
+
+rownames(DATA) <- DATA[,1]
+dim(DATA)
+```
+
+Saving data
+
+```{r}
+write.csv(DATA, file="../Expression/Annotation/Anno_astrocyte_counts.csv", quote = F, row.names = F)
+``` 
+
+
+## Study design
+
+Before starting to perform differential expression (DE) analyses, we need to prepare the design matrix related to the experimental samples. 
+This dataset contains:
+
+Treatments
+-`Tibolone` (DMEM + 1.35% BSA + 2mM Carnitine + 10nM Tibolone)
+-`Tibolone + Palmitic Acid` (DMEM + 1.35% BSA + 2mM Carnitine + 10nM Tibolone + 2mM Palmitic Acid)
+-`Palmitic Acid` (DMEM + 1.35% BSA + 2mM Carnitine + 2mM Palmitic Acid)
+
+Controls
+-`DMEM` (DMEM)
+-`VH` (DMEM + 1.35% BSA + 2mM Carnitine)
+
+Each treatment (AstroTi, AstroPA, AstroTiPA, AstroVH, AstroDMEM) had 3 biological replicates (i.e. lots from different donors ` "R2", "R3"`) and 2 technical replicates (i.e. samples from the same lot `"A", "B"`), for a total of 30 samples. 
+
+```{r}
+condition <- do.call(rbind,strsplit(colnames(DATA)[4:ncol(DATA)], split="[.]"))[,1]
+replicates <- do.call(rbind,strsplit(colnames(DATA)[4:ncol(DATA)], split="[.]"))[,2]
+colData <- data.frame(condition=factor(condition, levels=c("AstroDMEM", "AstroVH", "AstroTi", "AstroTiPA", "AstroPA")),
+                   replicates=factor(replicates, levels=c("R2A", "R2B", "R3A", "R3B")))
+colData$group <- factor(paste(condition, replicates, sep="_"))
+rownames(colData) <- colnames(DATA)[4:ncol(DATA)]
+print(colData)
+```
+
+## Data integration
+
+We then use this vector and the gene counts to create a DGEList, which is the object that edgeR uses for storing the data from a differential expression experiment.
+
+```{r}
+countsMat <- round(as.matrix(DATA[4:ncol(DATA)]))
+rownames(countsMat) <- DATA[,1]
+ddsNHA <- DGEList(counts = countsMat,
+                  group = colData$condition)
+ddsNHA$genes <- data.frame(DATA[1:3])
+ddsNHA$samples
+```
+
+
+```{r}
+cols <- as.numeric(ddsNHA$samples$group)+2
+barplot(ddsNHA$samples$lib.size*1e-04, col = cols, names = colnames(ddsNHA),
+        las = 2, ann = FALSE, cex.names = 0.7, cex.axis = 0.8)
+mtext(side = 1, text = "Samples", line = 4)
+mtext(side = 2, text = "Library size (millions)", line = 2)
+title("Barplot of library sizes")
+```
+
+## Filtering
+
+We should also remove genes that are unexpressed or very lowly expressed in the samples. Genes with a minimum requirement of 20 count per million (CPM) across libraries for each group have been kept
+
+```{r}
+keep <- filterByExpr(ddsNHA, min.count = 20)
+table(keep)
+ddsNHA <- ddsNHA[keep, , keep.lib.sizes=FALSE]
+```
+
+
+## Normalization
+
+The TMM normalization is applied to account for the compositional biases
+
+```{r}
+ddsNHA <- calcNormFactors(ddsNHA)
+ddsNHA$samples
+```
+
+
+## Quality control
+
+Next we’ll use boxplots to check the distribution of the read counts on the log2 scale. We can use the cpm function to get log2 counts per million, which are corrected for the different library sizes
+
+```{r warning=FALSE}
+par(mfrow=c(1,1))
+logcounts <- cpm(ddsNHA,log=TRUE)
+nsamples <- ncol(logcounts)
+col <- brewer.pal(nsamples, "Paired")
+boxplot(logcounts, las=2, col=col, main="", cex.axis = 0.75, cex = 0.7)
+abline(h=median(logcounts),col="blue")
+title(main="Normalized data",ylab="Log-cpm")
+```
+
+## Data exploration
+
+Before proceeding with the computations for differential expression, it is possible to produce a plot showing the sample relations based on multidimensional scaling (PCA). This is something that we will cover in much more detail in a later lecture
+
+```{r}
+points <- c(0,1,2,15,8)
+colors <- c("blue", "darkgreen", "red", "yellow", "violet")
+plotMDS(ddsNHA, col = colors[colData$condition], pch = points[colData$condition])
+legend("bottomright", legend = levels(colData$condition), pch=points, col = colors, ncol = 2, cex = 0.9)
+
+```
+
+## The design matrix
+
+```{r}
+group <- colData$condition
+design <- model.matrix(~ 0 + group)
+colnames(design) <- levels(group)
+design
+```
+
+## Estimating the dispersion
+
+DE analysis using the NB model, which estimates the dispersion parameter for each gene. Estimating the common dispersion gives an idea of overall variability across the genome for this dataset.
+
+```{r}
+ddsNHA <- estimateDisp(ddsNHA, design, robust=TRUE)
+plotBCV(ddsNHA)
+```
+
+For the QL dispersions, estimation can be performed using the `glmQLFit` function
+
+```{r}
+fit <- glmQLFit(ddsNHA, design, robust=TRUE)
+head(fit$coefficients)
+plotQLDisp(fit)
+```
+
+
+## Differential expression
+
+Now we will find genes differentially expressed among multiple combinations
+
+
+## Contrasts
+
+For this study we will perform 12 comparisons including:
+
+
+- `AstroVH vs AstroDMEM`
+- `AstroDMEM vs AstroVH`
+- `AstroTi vs AstroDMEM`
+- `AstroTi vs AstroVH`
+- `(AstroTi - AstroDMEM) vs (AstroVH - AstroDMEM)`
+- `AstroPA vs AstroDMEM`
+- `AstroPA vs AstroVH`
+- `AstroTiPA vs AstroDMEM`
+- `AstroTiPA vs AstroVH`
+- `AstroTiPA vs AstroPA`
+- `AstroPA vs AstroTi`
+- `(AstroPA - AstroDMEM) vs (AstroTi - AstroDMEM)`
+- `(AstroPA - AstroVH) vs (AstroTi - AstroVH)`
+- `(AstroPA - AstroDMEM) vs (AstroTiPA - AstroDMEM)`
+- `(AstroPA - AstroVH) vs (AstroTiPA - AstroVH)`
+
+The design of my contrasts is as follows
+
+```{r}
+my.contrasts <- makeContrasts(
+    # Vehicle vs DMEM
+    VHvsDMEM = AstroVH-AstroDMEM,
+    # DMEM vs Vehicle
+    DMEMvsVH = AstroDMEM-AstroVH,
+    # Tibolone vs DMEM
+    TivsDMEM = AstroTi-AstroDMEM,
+    # Tibolone vs VH
+    TivsVH = AstroTi-AstroVH,
+    # Difference between Tibolone vs DMEM and Vehicle vs DMEM
+    Ti_DMEMvsVHDMEM = (AstroTi-AstroDMEM)-(AstroVH-AstroDMEM),
+    # Palmitic Acid vs DMEM
+    PAvsDMEM = AstroPA-AstroDMEM,
+    # Palmitic Acid vs VH
+    PAvsVH = AstroPA-AstroVH,
+    # Tibolone + Palmitic Acid vs DMEM
+    TiPAvsDMEM = AstroTiPA-AstroDMEM,
+    # Tibolone + Palmitic Acid vs VH
+    TiPAvsVH = AstroTiPA-AstroVH,
+    # Tibolone + Palmitic Acid vs Palmitic Acid
+    TiPAvsPA = AstroTiPA-AstroPA,
+    # Palmitic Acid vs Tibolone
+    PAvsTi = AstroPA-AstroTi,
+    # Difference between Palmitic Acid vs DMEM and Tibolone vs DMEM
+    PA_TivsDMEM = (AstroPA-AstroDMEM)-(AstroTi-AstroDMEM),
+    # Difference between Palmitic Acid vs VH and Tibolone vs VH
+    PA_TivsVH = (AstroPA-AstroVH)-(AstroTi-AstroVH),
+    # Difference between Palmitic Acid vs DMEM and Tibolone + Palmitic Acid vs DMEM
+    PA_TiPAvsDMEM = (AstroPA-AstroDMEM)-(AstroTiPA-AstroDMEM),
+    # Difference between Palmitic Acid vs VH and Tibolone + Palmitic Acid vs VH
+    PA_TiPAvsVH = (AstroPA-AstroVH)-(AstroTiPA-AstroVH),   
+    levels=design)
+```
+
+## Functions
+
+```{r}
+# pretty format for edgeR results
+format_edgeR_results <- function( edgeR_results ) {
+  as.data.frame( edgeR_results ) %>%
+    filter( !is.na( PValue ) ) %>%
+    filter( !is.na( FDR ) ) %>%
+    select( gene_id, symbol, biotype, logFC, logCPM, F, PValue, FDR ) %>%
+    arrange( PValue, FDR, gene_id ) %>%
+    return( . )
+}
+```
+
+```{r}
+# Report differential expression
+
+summarize_pretty_edg <- function( pretty_edg, lfc_cutoff ) {
+  down <- pretty_edg %>%
+    filter( FDR <= 0.05 & logFC <= 1.0 ) %>%
+    pull( gene_id ) %>%
+    length( . )
+
+  down_fc <- pretty_edg %>%
+    filter( FDR <= 0.05 & logFC <= ( -1 * lfc_cutoff ) ) %>%
+    pull( gene_id ) %>%
+    length( . )
+
+  up <- pretty_edg %>%
+    filter( FDR <= 0.05 & logFC >= 1.0 ) %>%
+    pull( gene_id ) %>%
+    length( . )
+
+  up_fc <- pretty_edg %>%
+    filter( FDR <= 0.05 & logFC >= lfc_cutoff ) %>%
+    pull( gene_id ) %>%
+    length( . )
+
+data.frame( Change = c( 'Up', paste0( 'Up - min ', sprintf( fmt="%.2f", lfc_cutoff ) ), 'Down', paste0( 'Down - min ', sprintf( fmt="%.2f", lfc_cutoff ) ) ), n = c( up, up_fc, down, down_fc ) ) %>%
+    return( . )
+}
+```
+
+```{r}
+
+# ggplot modifiers
+
+gg_bigger_texts = theme(
+  axis.title = element_text( size = 20 ),
+  axis.text = element_text( size = 20 ),
+  legend.text = element_text( size = 14 ),
+  legend.title = element_text( size = 15 ),
+  plot.title = element_text( size = 20 ),
+  strip.text.x = element_text( size = 17, margin = margin( b = 5, t = 5 ) ),
+  strip.text.y = element_text( size = 15 )
+)
+
+gg_no_legend = theme(
+  legend.position='none'
+)
+
+gg_no_grid = theme(
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank()
+)
+
+gg_center_title = theme(
+  plot.title = element_text( hjust = 0.5 )
+)
+
+# volcano plots 
+
+make_ggplot_volcano <- function( deg_df, case_name, control_name, axis_steps = 2, lfc_cutoff = 1, FDR_cutoff = 0.05, max_label = 20 )
+{
+
+  # set significance threshold 
+
+  deg_df <- deg_df %>%
+    mutate( Significant = case_when(
+      FDR < FDR_cutoff & abs( logFC ) >= lfc_cutoff ~ "Large",
+      FDR < FDR_cutoff ~ "Modest",
+      TRUE ~ "Not" ) ) %>%
+    mutate( Significant = factor( Significant, levels=c( "Not", "Modest", "Large" ) ) )
+
+
+  # set values for square x axis
+
+  x_volcano_value <- ( abs( All_VHvsDMEM$logFC[ is.finite( All_VHvsDMEM$logFC ) ] ) + 0.05 ) %>%
+    max( . ) %>%
+    round( ., 1 )
+
+  if ( x_volcano_value < 1.0 ) {
+    x_volcano_value = 1.0
+  }
+  
+  x_num_for_limits <- round( x_volcano_value, 0 )
+
+  x_volcano_low <- x_volcano_value * -1
+  x_volcano_high <- x_volcano_value
+
+  x_break_list <- seq( -1 * x_num_for_limits, x_num_for_limits, by = axis_steps )
+
+ 
+  # plot lines
+
+  horizontal_line <- log10( FDR_cutoff ) * -1
+  vertical_line_1 <- lfc_cutoff
+  vertical_line_2 <- vertical_line_1 * -1
+
+
+  # actually make the volcano plots
+
+  plot_volcano <- ggplot( deg_df, aes( x=logFC, y=-log10( FDR ), colour=Significant ) ) +
+    scale_colour_manual( values = c( "darkgray", "mediumseagreen", "red" ) ) +
+    scale_x_continuous( limits = c( x_volcano_low, x_volcano_high ), breaks = x_break_list ) +
+    theme_bw() +
+    gg_bigger_texts +
+    gg_no_legend +
+    gg_no_grid +
+    gg_center_title +
+    geom_point( size=1.2 ) +
+    geom_hline( yintercept = horizontal_line, linetype=2 ) +
+    geom_vline( xintercept=c( vertical_line_1, vertical_line_2 ), linetype=2 ) +
+    geom_text_repel( data=subset( deg_df, Significant == "Large" )[c(1:max_label),],
+                     colour="black", aes( label=symbol ), size=3) +
+    xlab( parse( text=paste0( "log[2]~(", case_name, "/", control_name, ")" ) ) ) +
+    ylab( parse( text = paste0( "-log[10]~(Adj.~p-value)" ) ) )
+
+  return( plot_volcano )
+}
+```
+
+
+```{r}
+# Creating a list of DEGs
+
+getting_DEGs <- function( deg_df, FDR_cutoff, lfc_cutoff ) {
+ deg_df <- deg_df %>% 
+    mutate( regulation = case_when(
+      FDR < FDR_cutoff & logFC >= lfc_cutoff ~ "Up",
+      FDR < FDR_cutoff & logFC <= ( -1 * lfc_cutoff ) ~ "Down",
+      TRUE ~ "Not" ) ) %>%
+   filter( regulation != "Not" ) %>% 
+   arrange( desc(logFC) ) %>% 
+   return( . )
+}
+```
+
+## Vehicule vs DMEM
+
+Our first comparison aims to identify differentially expressed genes (DEGs) for both controls: Vehicule versus DMEM
+
+```{r comparison VHvsDMEM}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"VHvsDMEM"])
+VHvsDMEM <- topTags(res, n = nrow(fit$counts))
+# adjust p-values FDR
+VHvsDMEM$table$FDR <- p.adjust(VHvsDMEM$table$PValue, method = "BH")
+# showing results
+topTags(res)
+summary(decideTests(res))
+```
+
+Now we will format our results in a fancier layout
+
+```{r format VHvsDMEM}
+All_VHvsDMEM <- format_edgeR_results(VHvsDMEM)
+head(All_VHvsDMEM)
+```
+
+DEGs are selected by keeping those having an absolute log2 fold change at 1 and a FDR lower than 0.05.
+
+```{r report of DEGs VHvsDMEM}
+deg_df_VHvsDMEM <- summarize_pretty_edg(All_VHvsDMEM, 1)
+head(deg_df_VHvsDMEM)
+```
+
+```{r volcano VHvsDMEM, message=FALSE, warning=FALSE}
+volcano_VHvsDMEM <- make_ggplot_volcano( All_VHvsDMEM, case_name = "VH", control_name = "DMEM" )
+volcano_VHvsDMEM
+ggsave("../Expression/Volcano/Vol_VHvsDMEM.pdf", plot = volcano_VHvsDMEM)
+```
+
+
+```{r save VHvsDMEM}
+VHvsDMEMfilt <- getting_DEGs( All_VHvsDMEM, FDR_cutoff = 0.05, lfc_cutoff = 1 )
+head(VHvsDMEMfilt)
+write.csv(VHvsDMEMfilt, file="../Expression/DEGs/VHvsDMEM.csv", quote = F, row.names = F)
+```
+
+## DMEM vs VH
+
+
+```{r comparison DMEMvsVH}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"DMEMvsVH"])
+DMEMvsVH <- topTags(res, n = nrow(fit$counts))
+DMEMvsVH$table$FDR <- p.adjust(DMEMvsVH$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+
+```{r format DMEMvsVH}
+All_DMEMvsVH <- format_edgeR_results(DMEMvsVH)
+head(All_DMEMvsVH)
+```
+
+
+```{r report of DEGs DMEMvsVH}
+deg_df_DMEMvsVH <- summarize_pretty_edg(All_DMEMvsVH, 1)
+head(deg_df_DMEMvsVH)
+```
+
+```{r volcano DMEMvsVH, message=FALSE, warning=FALSE}
+volcano_DMEMvsVH <- make_ggplot_volcano( All_DMEMvsVH, case_name = "DMEM", control_name = "VH" )
+volcano_DMEMvsVH
+ggsave("../Expression/Volcano/Vol_DMEMvsVH.pdf", plot = volcano_DMEMvsVH)
+```
+
+```{r save DMEMvsVH}
+DMEMvsVHfilt <- getting_DEGs( All_DMEMvsVH, FDR_cutoff = 0.05, lfc_cutoff = 1 )
+head(DMEMvsVHfilt)
+write.csv(DMEMvsVHfilt, file="../Expression/DEGs/DMEMvsVH.csv", quote = F, row.names = F)
+```
+
+## `Tibolone vs DMEM`
+
+
+```{r comparison TivsDMEM}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"TivsDMEM"])
+TivsDMEM <- topTags(res, n = nrow(fit$counts))
+TivsDMEM$table$FDR <- p.adjust(TivsDMEM$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+```{r format TivsDMEM}
+All_TivsDMEM <- format_edgeR_results(TivsDMEM)
+head(All_TivsDMEM)
+```
+
+
+```{r report of DEGs TivsDMEM}
+deg_df_TivsDMEM <- summarize_pretty_edg(All_TivsDMEM, 1)
+head(deg_df_TivsDMEM)
+```
+
+```{r volcano TivsDMEM, message=FALSE, warning=FALSE}
+volcano_TivsDMEM <- make_ggplot_volcano( All_TivsDMEM, case_name = "TIB", control_name = "DMEM" )
+volcano_TivsDMEM
+ggsave("../Expression/Volcano/Vol_TivsDMEM.pdf", plot = volcano_TivsDMEM)
+```
+As a result, for this comparison we found: `Up` = 0 DEGs and `Down` = 0 DEGs
+
+## Tibolone vs VH
+
+```{r comparison TivsVH}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"TivsVH"])
+TivsVH <- topTags(res, n = nrow(fit$counts))
+TivsVH$table$FDR <- p.adjust(TivsVH$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+
+```{r format TivsVH}
+All_TivsVH <- format_edgeR_results(TivsVH)
+head(All_TivsVH)
+```
+
+
+```{r report of DEGs TivsVH}
+deg_df_TivsVH <- summarize_pretty_edg(All_TivsVH, 1)
+head(deg_df_TivsVH)
+```
+
+Volcano plot for TivsVH
+
+```{r volcano TivsVH, message=FALSE, warning=FALSE}
+volcano_TivsVH <- make_ggplot_volcano( All_TivsVH, case_name = "TIB", control_name = "VH" )
+volcano_TivsVH
+ggsave("../Expression/Volcano/Vol_TIBvsVH.pdf", plot = volcano_TivsVH)
+```
+
+
+```{r save TivsVH}
+TivsVHfilt <- getting_DEGs( All_TivsVH, FDR_cutoff = 0.05, lfc_cutoff = 1 )
+head(TivsVHfilt)
+write.csv(TivsVHfilt, file="../Expression/DEGs/TIBvsVH.csv", quote = F, row.names = F)
+```
+
+
+## Difference between Tibolone vs DMEM and VH vs DMEM
+
+```{r comparison Ti_DMEMvsVHDMEM}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"Ti_DMEMvsVHDMEM"])
+Ti_DMEMvsVHDMEM <- topTags(res, n = nrow(fit$counts))
+Ti_DMEMvsVHDMEM$table$FDR <- p.adjust(Ti_DMEMvsVHDMEM$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+```{r format Ti_DMEMvsVHDMEM}
+All_Ti_DMEMvsVHDMEM <- format_edgeR_results(Ti_DMEMvsVHDMEM)
+head(All_Ti_DMEMvsVHDMEM)
+```
+
+```{r report of DEGs Ti_DMEMvsVHDMEM}
+deg_df_Ti_DMEMvsVHDMEM <- summarize_pretty_edg(All_Ti_DMEMvsVHDMEM, 1)
+head(deg_df_Ti_DMEMvsVHDMEM)
+```
+
+```{r volcano Ti_DMEMvsVHDMEM, message=FALSE, warning=FALSE}
+volcano_Ti_DMEMvsVHDMEM <- make_ggplot_volcano( All_Ti_DMEMvsVHDMEM, case_name = "TIB-DMEM", control_name = "TIB-VH-DMEM" )
+volcano_Ti_DMEMvsVHDMEM
+ggsave("../Expression/Volcano/Vol_TIB_DMEMvsVHDMEM.pdf", plot = volcano_Ti_DMEMvsVHDMEM)
+```
+
+```{r save Ti_DMEMvsVHDMEM}
+Ti_DMEMvsVHDMEMfilt <- getting_DEGs( All_Ti_DMEMvsVHDMEM, FDR_cutoff = 0.05, lfc_cutoff = 1 )
+head(Ti_DMEMvsVHDMEMfilt)
+write.csv(Ti_DMEMvsVHDMEMfilt, file="../Expression/DEGs/TIB_DMEMvsVHDMEM.csv", quote = F, row.names = F)
+```
+
+
+
+## Palmitic Acid vs DMEM
+
+```{r comparison PAvsDMEM}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"PAvsDMEM"])
+PAvsDMEM <- topTags(res, n = nrow(fit$counts))
+PAvsDMEM$table$FDR <- p.adjust(PAvsDMEM$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+```{r format PAvsDMEM}
+All_PAvsDMEM <- format_edgeR_results(PAvsDMEM)
+head(All_PAvsDMEM)
+```
+
+```{r report of DEGs PAvsDMEM}
+deg_df_PAvsDMEM <- summarize_pretty_edg(All_PAvsDMEM, 1)
+head(deg_df_PAvsDMEM)
+```
+
+```{r volcano PAvsDMEM, message=FALSE, warning=FALSE}
+volcano_PAvsDMEM <- make_ggplot_volcano( All_PAvsDMEM, case_name = "PA", control_name = "DMEM" )
+volcano_PAvsDMEM
+ggsave("../Expression/Volcano/Vol_PAvsDMEM.pdf", plot = volcano_PAvsDMEM)
+```
+
+```{r save PAvsDMEM}
+PAvsDMEMfilt <- getting_DEGs( All_PAvsDMEM, FDR_cutoff = 0.05, lfc_cutoff = 1 )
+head(PAvsDMEMfilt)
+write.csv(PAvsDMEMfilt, file="../Expression/DEGs/PAvsDMEM.csv", quote = F, row.names = F)
+```
+
+
+## Palmitic Acid vs VH
+
+```{r comparison PAvsVH}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"PAvsVH"])
+PAvsVH <- topTags(res, n = nrow(fit$counts))
+PAvsVH$table$FDR <- p.adjust(PAvsVH$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+```{r format PAvsVH}
+All_PAvsVH <- format_edgeR_results(PAvsVH)
+head(All_PAvsVH)
+```
+
+```{r report of DEGs PAvsVH}
+deg_df_PAvsVH <- summarize_pretty_edg(All_PAvsVH, 1)
+head(deg_df_PAvsVH)
+```
+
+```{r volcano PAvsVH, message=FALSE, warning=FALSE}
+volcano_PAvsVH <- make_ggplot_volcano( All_PAvsVH, case_name = "PA", control_name = "VH" )
+volcano_PAvsVH
+ggsave("../Expression/Volcano/Vol_PAvsVH.pdf", plot = volcano_PAvsVH)
+```
+
+```{r save PAvsVH}
+PAvsVHfilt <- getting_DEGs( All_PAvsVH, FDR_cutoff = 0.05, lfc_cutoff = 1 )
+head(PAvsVHfilt)
+write.csv(PAvsVHfilt, file="../Expression/DEGs/PAvsVH.csv", quote = F, row.names = F)
+```
+
+
+## Tibolone + Palmitic Acid vs DMEM
+
+```{r comparison TiPAvsDMEM}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"TiPAvsDMEM"])
+TiPAvsDMEM <- topTags(res, n = nrow(fit$counts))
+TiPAvsDMEM$table$FDR <- p.adjust(TiPAvsDMEM$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+```{r format TiPAvsDMEM}
+All_TiPAvsDMEM <- format_edgeR_results(TiPAvsDMEM)
+head(All_TiPAvsDMEM)
+```
+
+```{r report of DEGs TiPAvsDMEM}
+deg_df_TiPAvsDMEM <- summarize_pretty_edg(All_TiPAvsDMEM, 1)
+head(deg_df_TiPAvsDMEM)
+```
+
+```{r volcano TiPAvsDMEM, message=FALSE, warning=FALSE}
+volcano_TiPAvsDMEM <- make_ggplot_volcano( All_TiPAvsDMEM, case_name = "TIBPA", control_name = "DMEM" )
+volcano_TiPAvsDMEM
+ggsave("../Expression/Volcano/Vol_TIBPAvsDMEM.pdf", plot = volcano_TiPAvsDMEM)
+```
+
+```{r save TiPAvsDMEM}
+TiPAvsDMEMfilt <- getting_DEGs( All_TiPAvsDMEM, FDR_cutoff = 0.05, lfc_cutoff = 1 )
+head(TiPAvsDMEMfilt)
+write.csv(TiPAvsDMEMfilt, file="../Expression/DEGs/TIBPAvsDMEM.csv", quote = F, row.names = F)
+```
+
+
+## Tibolone + Palmitic Acid vs VH
+
+```{r comparison TiPAvsVH}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"TiPAvsVH"])
+TiPAvsVH <- topTags(res, n = nrow(fit$counts))
+TiPAvsVH$table$FDR <- p.adjust(TiPAvsVH$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+```{r format TiPAvsVH}
+All_TiPAvsVH <- format_edgeR_results(TiPAvsVH)
+head(All_TiPAvsVH)
+```
+
+```{r report of DEGs TiPAvsVH}
+deg_df_TiPAvsVH <- summarize_pretty_edg(All_TiPAvsVH, 1)
+head(deg_df_TiPAvsVH)
+```
+
+```{r volcano TiPAvsVH, message=FALSE, warning=FALSE}
+volcano_TiPAvsVH <- make_ggplot_volcano( All_TiPAvsVH, case_name = "TIPA", control_name = "VH" )
+volcano_TiPAvsVH
+ggsave("../Expression/Volcano/Vol_TIBPAvsVH.pdf", plot = volcano_TiPAvsVH)
+```
+
+```{r save TiPAvsVH}
+TiPAvsVHfilt <- getting_DEGs( All_TiPAvsVH, FDR_cutoff = 0.05, lfc_cutoff = 1 )
+head(TiPAvsVHfilt)
+write.csv(TiPAvsVHfilt, file="../Expression/DEGs/TIBPAvsVH.csv", quote = F, row.names = F)
+```
+
+
+## Palmitic Acid vs Tibolone
+
+```{r comparison PAvsTi}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"PAvsTi"])
+PAvsTi <- topTags(res, n = nrow(fit$counts))
+PAvsTi$table$FDR <- p.adjust(PAvsTi$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+```{r format PAvsTi}
+All_PAvsTi <- format_edgeR_results(PAvsTi)
+head(All_PAvsTi)
+```
+
+```{r report of DEGs PAvsTi}
+deg_df_PAvsTi <- summarize_pretty_edg(All_PAvsTi, 1)
+head(deg_df_PAvsTi)
+```
+
+```{r volcano PAvsTi, message=FALSE, warning=FALSE}
+volcano_PAvsTi <- make_ggplot_volcano( All_PAvsTi, case_name = "PA", control_name = "TIB" )
+volcano_PAvsTi
+ggsave("../Expression/Volcano/Vol_PAvsTIB.pdf", plot = volcano_PAvsTi)
+```
+
+```{r save PAvsTi}
+PAvsTifilt <- getting_DEGs( All_PAvsTi, FDR_cutoff = 0.05, lfc_cutoff = 1 )
+head(PAvsTifilt)
+write.csv(PAvsTifilt, file="../Expression/DEGs/PAvsTIB.csv", quote = F, row.names = F)
+```
+
+
+## `Tibolone + Palmitic Acid vs Palmitic Acid`
+
+```{r comparison TiPAvsPA}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"TiPAvsPA"])
+TiPAvsPA <- topTags(res, n = nrow(fit$counts))
+TiPAvsPA$table$FDR <- p.adjust(TiPAvsPA$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+```{r format TiPAvsPA}
+All_TiPAvsPA <- format_edgeR_results(TiPAvsPA)
+head(All_TiPAvsPA)
+```
+
+```{r report of DEGs TiPAvsPA}
+deg_df_TiPAvsPA <- summarize_pretty_edg(All_TiPAvsPA, 1)
+head(deg_df_TiPAvsPA)
+```
+
+```{r volcano TiPAvsPA, message=FALSE, warning=FALSE}
+volcano_TiPAvsPA <- make_ggplot_volcano( All_TiPAvsPA, case_name = "TIBPA", control_name = "PA" )
+volcano_TiPAvsPA
+ggsave("../Expression/Volcano/Vol_TIBPAvsPA.pdf", plot = volcano_TiPAvsPA)
+```
+
+For this comparison we found: `Up` = 0 DEGs and `Down` = 0 DEGs
+
+
+## Difference between Palmitic Acid vs DMEM and Tibolone vs DMEM
+
+```{r comparison PA_TivsDMEM}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"PA_TivsDMEM"])
+PA_TivsDMEM <- topTags(res, n = nrow(fit$counts))
+PA_TivsDMEM$table$FDR <- p.adjust(PA_TivsDMEM$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+```{r format PA_TivsDMEM}
+All_PA_TivsDMEM <- format_edgeR_results(PA_TivsDMEM)
+head(All_PA_TivsDMEM)
+```
+
+```{r report of DEGs PA_TivsDMEM}
+deg_df_PA_TivsDMEM <- summarize_pretty_edg(All_PA_TivsDMEM, 1)
+head(deg_df_PA_TivsDMEM)
+```
+
+```{r volcano PA_TivsDMEM, message=FALSE, warning=FALSE}
+volcano_PA_TivsDMEM <- make_ggplot_volcano( All_PA_TivsDMEM, case_name = "PA-DMEM", control_name = "TIB-DMEM" )
+volcano_PA_TivsDMEM
+ggsave("../Expression/Volcano/Vol_PA_TIBvsDMEM.pdf", plot = volcano_PA_TivsDMEM)
+```
+
+```{r save PA_TivsDMEM}
+PA_TivsDMEMfilt <- getting_DEGs( All_PA_TivsDMEM, FDR_cutoff = 0.05, lfc_cutoff = 1 )
+head(PA_TivsDMEMfilt)
+write.csv(PA_TivsDMEMfilt, file="../Expression/DEGs/PA_TIBvsDMEM.csv", quote = F, row.names = F)
+```
+
+
+## Difference between Palmitic Acid vs VH and Tibolone vs VH
+
+```{r comparison PA_TivsVH}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"PA_TivsVH"])
+PA_TivsVH <- topTags(res, n = nrow(fit$counts))
+PA_TivsVH$table$FDR <- p.adjust(PA_TivsVH$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+```{r format PA_TivsVH}
+All_PA_TivsVH <- format_edgeR_results(PA_TivsVH)
+head(All_PA_TivsVH)
+```
+
+```{r report of DEGs PA_TivsVH}
+deg_df_PA_TivsVH <- summarize_pretty_edg(All_PA_TivsVH, 1)
+head(deg_df_PA_TivsVH)
+```
+
+```{r volcano PA_TivsVH, message=FALSE, warning=FALSE}
+volcano_PA_TivsVH <- make_ggplot_volcano( All_PA_TivsVH, case_name = "PA-VH", control_name = "TIB-VH" )
+volcano_PA_TivsVH
+ggsave("../Expression/Volcano/Vol_PA_TIBvsVH.pdf", plot = volcano_PA_TivsVH)
+```
+
+```{r save PA_TivsVH}
+PA_TivsVHfilt <- getting_DEGs( All_PA_TivsVH, FDR_cutoff = 0.05, lfc_cutoff = 1 )
+head(PA_TivsVHfilt)
+write.csv(PA_TivsVHfilt, file="../Expression/DEGs/PA_TIBvsVH.csv", quote = F, row.names = F)
+```
+
+
+## `Difference between Palmitic Acid vs DMEM and Tibolone + Palmitic Acid vs DMEM`
+
+```{r comparison PA_TiPAvsDMEM}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"PA_TiPAvsDMEM"])
+PA_TiPAvsDMEM<- topTags(res, n = nrow(fit$counts))
+PA_TiPAvsDMEM$table$FDR <- p.adjust(PA_TiPAvsDMEM$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+```{r format PA_TiPAvsDMEM}
+All_PA_TiPAvsDMEM <- format_edgeR_results(PA_TiPAvsDMEM)
+head(All_PA_TiPAvsDMEM)
+```
+
+```{r report of DEGs PA_TiPAvsDMEM}
+deg_df_PA_TiPAvsDMEM <- summarize_pretty_edg(All_PA_TiPAvsDMEM, 1)
+head(deg_df_PA_TiPAvsDMEM)
+```
+
+For this comparison we found: `Up` = 0 DEGs and `Down` = 0 DEGs
+
+
+## `Difference between Palmitic Acid vs VH and Tibolone + Palmitic Acid vs VH`
+
+```{r comparison PA_TiPAvsVH}
+res <- glmQLFTest(fit, contrast=my.contrasts[,"PA_TiPAvsVH"])
+PA_TiPAvsVH <- topTags(res, n = nrow(fit$counts))
+PA_TiPAvsVH$table$FDR <- p.adjust(PA_TiPAvsVH$table$PValue, method = "BH")
+
+topTags(res)
+summary(decideTests(res))
+```
+
+```{r format PA_TiPAvsVH}
+All_PA_TiPAvsVH <- format_edgeR_results(PA_TiPAvsVH)
+head(All_PA_TiPAvsVH)
+```
+
+```{r report of DEGs PA_TiPAvsVH}
+deg_df_PA_TiPAvsVH <- summarize_pretty_edg(All_PA_TiPAvsVH, 1)
+head(deg_df_PA_TiPAvsVH)
+```
+
+For this comparison we found: `Up` = 0 DEGs and `Down` = 0 DEGs
+
+
+## Heatmap
+
+```{r heatmap, message=FALSE, warning=FALSE}
+logCPM <- cpm(ddsNHA, prior.count=2, log=TRUE)
+
+topDEGs <- c(rownames(TiPAvsVHfilt),
+             rownames(PAvsVHfilt))
+
+logCPM <- logCPM[,c(1:16)]
+col_order <- c(13:16,5:8,9:12,1:4)
+logCPM <- logCPM[, col_order]
+colnames(logCPM) <- factor(c("TiPA-R1 ", "TiPA-R2", "TiPA-R3", "TiPA-R4",
+                             "PA-R1 ", "PA-R2", "PA-R3", "PA-R4",
+                             "Ti-R1", "Ti-R2", "Ti-R3", "Ti-R4",
+                             "DMEM-R1", "DMEM-R2", "DMEM-R3", "DMEM-R4"))
+
+logCPM <- logCPM[rownames(logCPM)%in%topDEGs,]
+logCPM <- t(scale(t(logCPM)))
+
+# get log2change and p-values
+
+logFC <- All_TiPAvsVH %>% 
+  dplyr::select(TiPA = logFC, gene_id) %>%
+  merge(All_PAvsVH, ., by = "gene_id") %>%
+  dplyr::select(TiPA, PA = logFC, gene_id) %>%
+  tibble::column_to_rownames(var = "gene_id")
+
+
+#select only significant logFC
+
+logFC <- logFC[rownames(logFC)%in%topDEGs,]
+
+
+# ordering
+
+logCPM <- logCPM[order(logFC$TiPA, decreasing = T), ]
+logFC <- logFC[order(logFC$TiPA, decreasing = T), ]
+```
+
+
+```{r}
+orden <- c(rep("TiPA", 4), rep("PA", 4), rep("Ti", 4), rep("DMEM", 4))
+level <- c("TiPA", "PA", "Ti", "DMEM")
+c1 =  circlize::colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+c2 =  circlize::colorRamp2(c(-2, 0, 2), c("darkblue", "white", "green"))
+ht1 <- Heatmap(logCPM, name = "Log CPM",
+               show_row_names = F, show_column_names = F,
+               col=c1, cluster_rows = F,
+               show_heatmap_legend = F, cluster_columns = F,
+               row_title_side = "right", row_title_rot = 0,
+               border = TRUE, 
+               column_names_max_height=max_text_width(rownames(logCPM)),
+               column_split = factor(orden, levels = level), 
+               row_gap = unit(0, "cm"))
+
+
+ht2 <- Heatmap(logFC, name = "Log2 FC",
+               col = c2,
+               cluster_rows = F, cluster_columns = F, show_heatmap_legend = F,
+               show_row_names = F, border = TRUE, row_title_side = "right", row_title_rot = 0,
+               column_split = factor(c("TiPA", "PA"), levels = level),
+               show_column_names = F, width = unit(6, "cm"))
+
+ht_list = ht1 + ht2 
+ht_list
+
+lgd1 = Legend(col_fun = c1, title = expression("Log CPM"), labels_gp = gpar(fontsize = 20),
+             title_gp = gpar(fontsize = 24),
+             at = c(-3, 0, 3), legend_width = unit(4, "cm"), grid_width =  unit(0.8, "cm"),
+             labels = c("-3", "  0", "  3"), legend_height = unit(5, "cm"),
+             title_position = "leftcenter-rot")
+lgd2 = Legend(col_fun = c2, title = expression("Log"[2]*" FC"), labels_gp = gpar(fontsize = 20),
+             title_gp = gpar(fontsize = 24),grid_width =  unit(0.8, "cm"),
+             at = c(-8, 0, 8), legend_width = unit(4, "cm"),
+             labels = c("-8", "  0", "  8"), legend_height = unit(5, "cm"),
+             title_position = "leftcenter-rot")
+
+
+pdf("../Expression//Heatmap/heatmap.pdf", width = 10, height = 20)
+draw(ht_list, ht_gap = unit(1, "cm"), padding = unit(c(0.2, 0.2, 0.2, 5.5), "cm"))
+draw(lgd1, x = unit(22, "cm"), y = unit(33.35, "cm"), just = c("left", "top"))
+draw(lgd2, x = unit(22, "cm"), y = unit(23.3, "cm"), just = c("left", "top"))
+dev.off()
+
+```
+
+## Getting expressed genes
+
+In order to perform an overrepresentation analysis (ORA), we will retrieve all genes were selected from already had unreliably detected, low count genes removed
+
+```{r aal_genes}
+
+allgenesfilt <- ddsNHA[["genes"]][["gene_id"]] %>%
+  data.frame( . ) %>% 
+  dplyr::rename( ., gene_id = . )
+
+write.csv(allgenesfilt, file="../Expression/Annotation/allgenesfilt.csv", quote = F, row.names = F)
+```
+
+## Session info
+
+```{r session_information}
+Sys.time()
+getwd()
+  
+sessionInfo()
+```
