@@ -1,4 +1,4 @@
-# **Palmitic Acid Upregulates Type I Interferon-Mediated Antiviral Response and Cholesterol Biosynthesis in Normal Human Astrocytes**
+# **Palmitic Acid Upregulates Type I Interferon-Mediated Antiviral Response and Cholesterol Biosynthesis in Human Astrocytes**
 
 The following repository contains the notebooks and the libraries used to obtain the results of this article. All datasets and libraries are open sourced and free to use. If you use any of the following in your analysis, please cite them properly.
 
